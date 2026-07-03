@@ -9,11 +9,15 @@ struct AudioDevice: Identifiable, Hashable {
     let id: String
     let name: String
     let deviceID: AudioDeviceID?
+    let deviceUID: String?
+    let screenCaptureKitDeviceID: String?
     
     static let defaultDevice = AudioDevice(
-        id: "default", 
+        id: "default",
         name: "Default Device",
-        deviceID: nil
+        deviceID: nil,
+        deviceUID: nil,
+        screenCaptureKitDeviceID: nil
     )
 }
 
@@ -92,8 +96,10 @@ class AudioManager: ObservableObject {
             let devices = try await enumerateAudioInputDevices()
             await MainActor.run {
                 self.availableMicrophones = [AudioDevice.defaultDevice] + devices
-                // 如果当前选择的设备不在列表中，重置为默认
-                if !self.availableMicrophones.contains(where: { $0.id == selectedMicrophone.id }) {
+                // 如果当前选择的设备仍在列表中，用刷新后的 ID 信息替换；否则重置为默认。
+                if let refreshedSelection = self.availableMicrophones.first(where: { $0.id == selectedMicrophone.id }) {
+                    self.selectedMicrophone = refreshedSelection
+                } else {
                     self.selectedMicrophone = AudioDevice.defaultDevice
                 }
                 self.isLoading = false
@@ -124,6 +130,11 @@ class AudioManager: ObservableObject {
     
     nonisolated private func getAudioInputDevices() throws -> [AudioDevice] {
         var devices: [AudioDevice] = []
+        let avCaptureDevices = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.microphone],
+            mediaType: .audio,
+            position: .unspecified
+        ).devices
         
         // 获取所有音频设备数量
         var propertyAddress = AudioObjectPropertyAddress(
@@ -167,7 +178,7 @@ class AudioManager: ObservableObject {
         
         // 筛选输入设备
         for deviceID in deviceIDs {
-            if let device = try? createAudioDevice(from: deviceID), isInputDevice(deviceID) {
+            if let device = try? createAudioDevice(from: deviceID, avCaptureDevices: avCaptureDevices), isInputDevice(deviceID) {
                 devices.append(device)
             }
         }
@@ -175,14 +186,46 @@ class AudioManager: ObservableObject {
         return devices
     }
     
-    nonisolated private func createAudioDevice(from deviceID: AudioDeviceID) throws -> AudioDevice {
-        // 获取设备名称
+    nonisolated private func createAudioDevice(
+        from deviceID: AudioDeviceID,
+        avCaptureDevices: [AVCaptureDevice]
+    ) throws -> AudioDevice {
+        let name = try stringProperty(
+            deviceID: deviceID,
+            selector: kAudioDevicePropertyDeviceNameCFString,
+            errorDescription: "Could not get device name"
+        )
+        let deviceUID = try? stringProperty(
+            deviceID: deviceID,
+            selector: kAudioDevicePropertyDeviceUID,
+            errorDescription: "Could not get device UID"
+        )
+        let screenCaptureKitDeviceID = matchingAVCaptureDeviceID(
+            deviceUID: deviceUID,
+            name: name,
+            avCaptureDevices: avCaptureDevices
+        )
+
+        return AudioDevice(
+            id: deviceUID ?? String(deviceID),
+            name: name,
+            deviceID: deviceID,
+            deviceUID: deviceUID,
+            screenCaptureKitDeviceID: screenCaptureKitDeviceID
+        )
+    }
+
+    nonisolated private func stringProperty(
+        deviceID: AudioDeviceID,
+        selector: AudioObjectPropertySelector,
+        errorDescription: String
+    ) throws -> String {
         var propertyAddress = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyDeviceNameCFString,
+            mSelector: selector,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
-        
+
         var dataSize: UInt32 = 0
         var status = AudioObjectGetPropertyDataSize(
             deviceID,
@@ -191,35 +234,50 @@ class AudioManager: ObservableObject {
             nil,
             &dataSize
         )
-        
+
         guard status == noErr else {
             throw NSError(domain: "AudioError", code: Int(status), userInfo: [
-                NSLocalizedDescriptionKey: "Could not get device name size"
+                NSLocalizedDescriptionKey: "\(errorDescription) size"
             ])
         }
-        
-        var deviceName: Unmanaged<CFString>?
+
+        var propertyValue: Unmanaged<CFString>?
         status = AudioObjectGetPropertyData(
             deviceID,
             &propertyAddress,
             0,
             nil,
             &dataSize,
-            &deviceName
+            &propertyValue
         )
-        
-        guard status == noErr, let deviceNameRef = deviceName?.takeRetainedValue(),
-              let name = deviceNameRef as String? else {
+
+        guard status == noErr,
+              let valueRef = propertyValue?.takeRetainedValue(),
+              let value = valueRef as String? else {
             throw NSError(domain: "AudioError", code: Int(status), userInfo: [
-                NSLocalizedDescriptionKey: "Could not get device name"
+                NSLocalizedDescriptionKey: errorDescription
             ])
         }
-        
-        return AudioDevice(
-            id: String(deviceID),
-            name: name,
-            deviceID: deviceID
-        )
+
+        return value
+    }
+
+    nonisolated private func matchingAVCaptureDeviceID(
+        deviceUID: String?,
+        name: String,
+        avCaptureDevices: [AVCaptureDevice]
+    ) -> String? {
+        if let deviceUID,
+           let matchingDevice = avCaptureDevices.first(where: { $0.uniqueID == deviceUID }) {
+            return matchingDevice.uniqueID
+        }
+
+        let sameNameDevices = avCaptureDevices.filter { $0.localizedName == name }
+        if sameNameDevices.count == 1 {
+            return sameNameDevices[0].uniqueID
+        }
+
+        return nil
     }
     
     nonisolated private func isInputDevice(_ deviceID: AudioDeviceID) -> Bool {
@@ -249,11 +307,12 @@ class AudioManager: ObservableObject {
     
     // MARK: - SCK集成支持
     func getMicrophoneDeviceIDForSCK() -> String? {
-        guard selectedMicrophone.id != AudioDevice.defaultDevice.id,
-              let deviceID = selectedMicrophone.deviceID else {
+        guard selectedMicrophone.id != AudioDevice.defaultDevice.id else {
             return nil  // 使用默认设备
         }
-        return String(deviceID)
+
+        // ScreenCaptureKit expects AVCaptureDevice.uniqueID, not CoreAudio's numeric AudioDeviceID.
+        return selectedMicrophone.screenCaptureKitDeviceID ?? selectedMicrophone.deviceUID
     }
     
     // MARK: - macOS版本适配
