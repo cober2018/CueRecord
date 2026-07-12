@@ -70,7 +70,7 @@ You can manage these permissions in macOS System Settings under Privacy & Securi
 
 ## Requirements
 
-- macOS 15.7 or later
+- macOS 14.1 or later
 - Apple Silicon or Intel Mac
 
 ## Build From Source

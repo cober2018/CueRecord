@@ -528,6 +528,7 @@ final class RecordingController: ObservableObject {
                     systemAudioEnabled: recordingState.systemAudioEnabled,
                     microphoneEnabled: recordingState.microphoneEnabled,
                     microphoneDeviceID: audioManager.getMicrophoneDeviceIDForSCK(),
+                    microphoneAudioDeviceID: audioManager.selectedMicrophone.deviceID,
                     displayID: displayIDForRecording
                 )
 

@@ -102,6 +102,7 @@ class ScreenRecorder: NSObject, ObservableObject {
     private var systemAudioEnabled: Bool = false
     private var microphoneEnabled: Bool = false
     private var microphoneDeviceID: String? = nil
+    private var microphoneAudioDeviceID: AudioDeviceID? = nil
     
     // 摄像头叠加层
     private let cameraManager = CameraManager()
@@ -186,6 +187,7 @@ class ScreenRecorder: NSObject, ObservableObject {
         systemAudioEnabled: Bool = false,
         microphoneEnabled: Bool = false,
         microphoneDeviceID: String? = nil,
+        microphoneAudioDeviceID: AudioDeviceID? = nil,
         displayID: CGDirectDisplayID? = nil
     ) async throws {
         guard canRecord && !isRecording else {
@@ -199,6 +201,7 @@ class ScreenRecorder: NSObject, ObservableObject {
             self.systemAudioEnabled = systemAudioEnabled
             self.microphoneEnabled = microphoneEnabled
             self.microphoneDeviceID = microphoneDeviceID
+            self.microphoneAudioDeviceID = microphoneAudioDeviceID
             pendingAudioBuffers.removeAll()
             frameCount = 0
             firstVideoFrameTime = nil
@@ -589,7 +592,7 @@ class ScreenRecorder: NSObject, ObservableObject {
             try setupAudioCapture(
                 systemAudioEnabled: self.systemAudioEnabled, 
                 microphoneEnabled: self.microphoneEnabled,
-                microphoneDeviceID: self.microphoneDeviceID
+                microphoneAudioDeviceID: self.microphoneAudioDeviceID
             )
         }
         
@@ -643,7 +646,7 @@ class ScreenRecorder: NSObject, ObservableObject {
     private func setupAudioCapture(
         systemAudioEnabled: Bool,
         microphoneEnabled: Bool,
-        microphoneDeviceID: String?
+        microphoneAudioDeviceID: AudioDeviceID?
     ) throws {
         print("🎤 设置音频录制 - 系统音频: \(systemAudioEnabled), 麦克风: \(microphoneEnabled)")
         
@@ -669,7 +672,7 @@ class ScreenRecorder: NSObject, ObservableObject {
                 // macOS 13-14: 使用AVAudioEngine
                 try setupAVAudioEngineMicrophone(
                     videoWriter: videoWriter,
-                    deviceID: microphoneDeviceID
+                    deviceID: microphoneAudioDeviceID
                 )
                 print("✅ 麦克风录制已启用 (AVAudioEngine兼容方案)")
             }
@@ -701,7 +704,7 @@ class ScreenRecorder: NSObject, ObservableObject {
     }
     
     // MARK: - AVAudioEngine麦克风设置
-    private func setupAVAudioEngineMicrophone(videoWriter: AVAssetWriter, deviceID: String?) throws {
+    private func setupAVAudioEngineMicrophone(videoWriter: AVAssetWriter, deviceID: AudioDeviceID?) throws {
         // 配置麦克风音频输入
         let micSettings: [String: Any] = [
             AVFormatIDKey: kAudioFormatMPEG4AAC,
@@ -727,9 +730,8 @@ class ScreenRecorder: NSObject, ObservableObject {
         avAudioEngineRecorder = AVAudioEngineRecorder()
         
         // 设置音频设备
-        if let deviceID = deviceID,
-           let audioDeviceID = AudioDeviceID(deviceID) {
-            avAudioEngineRecorder?.setInputDevice(deviceID: audioDeviceID)
+        if let deviceID {
+            avAudioEngineRecorder?.setInputDevice(deviceID: deviceID)
         }
         
         print("🎤 AVAudioEngine麦克风录制已配置")
