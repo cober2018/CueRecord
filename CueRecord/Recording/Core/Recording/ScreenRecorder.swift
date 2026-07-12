@@ -150,14 +150,31 @@ class ScreenRecorder: NSObject, ObservableObject {
     private func checkCanRecord() {
         Task {
             do {
-                // 检查ScreenCaptureKit可用性和权限
-                let availableContent = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-                canRecord = !availableContent.displays.isEmpty
+                _ = try await availableContentForRecording()
                 print("📺 ScreenCaptureKit 可用: \(canRecord)")
             } catch {
                 canRecord = false
                 print("❌ ScreenCaptureKit 检查失败: \(error)")
             }
+        }
+    }
+
+    private func availableContentForRecording() async throws -> SCShareableContent {
+        do {
+            let availableContent = try await SCShareableContent.excludingDesktopWindows(
+                false,
+                onScreenWindowsOnly: true
+            )
+            guard !availableContent.displays.isEmpty else {
+                canRecord = false
+                throw RecordingError.noDisplayFound
+            }
+
+            canRecord = true
+            return availableContent
+        } catch {
+            canRecord = false
+            throw error
         }
     }
     
@@ -190,7 +207,7 @@ class ScreenRecorder: NSObject, ObservableObject {
         microphoneAudioDeviceID: AudioDeviceID? = nil,
         displayID: CGDirectDisplayID? = nil
     ) async throws {
-        guard canRecord && !isRecording else {
+        guard !isRecording else {
             throw RecordingError.invalidState
         }
         
@@ -330,7 +347,7 @@ class ScreenRecorder: NSObject, ObservableObject {
     private func startFullScreenRecording(displayID: CGDirectDisplayID?) async throws {
         print("📺 开始全屏录制...")
         
-        let availableContent = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        let availableContent = try await availableContentForRecording()
         let display: SCDisplay
         if let displayID {
             guard let selectedDisplay = availableContent.displays.first(where: { $0.displayID == displayID }) else {
@@ -359,7 +376,7 @@ class ScreenRecorder: NSObject, ObservableObject {
     private func startAreaRecording(rect: CGRect) async throws {
         print("🔍 开始区域录制: \(rect)")
         
-        let availableContent = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        let availableContent = try await availableContentForRecording()
         guard let display = displayContaining(rect, in: availableContent.displays) ?? availableContent.displays.first else {
             throw RecordingError.noDisplayFound
         }
@@ -378,7 +395,7 @@ class ScreenRecorder: NSObject, ObservableObject {
     private func startWindowRecording(target: WindowRecordingTarget) async throws {
         print("🪟 开始窗口录制: \(target.displayName), id: \(target.windowID), frame: \(target.frame)")
 
-        let availableContent = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        let availableContent = try await availableContentForRecording()
         guard let display = displayContaining(target.frame, in: availableContent.displays) ?? availableContent.displays.first else {
             throw RecordingError.noDisplayFound
         }

@@ -490,10 +490,13 @@ final class RecordingController: ObservableObject {
         Task {
             await permissionsManager.checkAllPermissions()
 
+            if !permissionsManager.screenRecordingAuthorized {
+                await permissionsManager.requestScreenRecordingPermission()
+            }
+
             guard permissionsManager.screenRecordingAuthorized else {
                 isStarting = false
                 lastError = "Screen recording permission is required."
-                await permissionsManager.requestScreenRecordingPermission()
                 completion?(false)
                 return
             }
