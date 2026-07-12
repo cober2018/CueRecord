@@ -27,8 +27,8 @@ Personal website: [nolanlai.com](https://www.nolanlai.com/)
 
 Download the latest signed and notarized macOS build:
 
-- [Download CueRecord-v2.0.3.dmg](https://github.com/nolangz/CueRecord/releases/download/v2.0.3/CueRecord-v2.0.3.dmg)
-- [Release notes](https://github.com/nolangz/CueRecord/releases/tag/v2.0.3)
+- [Download CueRecord-v2.0.4.dmg](https://github.com/nolangz/CueRecord/releases/download/v2.0.4/CueRecord-v2.0.4.dmg)
+- [Release notes](https://github.com/nolangz/CueRecord/releases/tag/v2.0.4)
 
 ## Use Cases
 
