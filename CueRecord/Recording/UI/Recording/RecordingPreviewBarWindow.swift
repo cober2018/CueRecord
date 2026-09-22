@@ -197,6 +197,7 @@ private struct RecordingPreviewBarView: View {
     @ObservedObject private var interfaceLanguage = InterfaceLanguageSettings.shared
     @ObservedObject private var controller: RecordingController
     @ObservedObject private var recordingState: RecordingState
+    @ObservedObject private var permissionsManager: PermissionsManager
     @ObservedObject private var audioManager: AudioManager
     @ObservedObject private var cameraManager: CameraManager
 
@@ -210,6 +211,7 @@ private struct RecordingPreviewBarView: View {
     ) {
         self.controller = controller
         self.recordingState = controller.recordingState
+        self.permissionsManager = controller.permissionsManager
         self.audioManager = controller.audioManager
         self.cameraManager = controller.cameraManager
         self.onStart = onStart
@@ -282,6 +284,8 @@ private struct RecordingPreviewBarView: View {
 
             optionsMenu
 
+            preflightBadge
+
             Button(action: onStart) {
                 HStack(spacing: 8) {
                     if controller.isStarting {
@@ -299,8 +303,18 @@ private struct RecordingPreviewBarView: View {
                 .background(Color.blue, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
             .buttonStyle(.plain)
-            .disabled(controller.isStarting || controller.isRecording || controller.isStopping)
-            .opacity(controller.isStarting || controller.isRecording || controller.isStopping ? 0.55 : 1)
+            .disabled(
+                controller.isStarting
+                    || controller.isRecording
+                    || controller.isStopping
+            )
+            .opacity(
+                controller.isStarting
+                    || controller.isRecording
+                    || controller.isStopping
+                    ? 0.55
+                    : 1
+            )
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
@@ -321,6 +335,57 @@ private struct RecordingPreviewBarView: View {
             .fill(Color.primary.opacity(0.18))
             .frame(width: 1, height: 38)
             .padding(.horizontal, 2)
+    }
+
+    private var preflightBadge: some View {
+        let readiness = controller.recordingReadiness
+        let blocker = readiness.blockers.first
+        let label: String
+        let symbol: String
+        let color: Color
+
+        if readiness.isReady {
+            label = t("Ready")
+            symbol = "checkmark.circle.fill"
+            color = .green
+        } else {
+            switch blocker {
+            case .screenPermission:
+                label = t("Screen permission needed")
+                symbol = "exclamationmark.circle.fill"
+                color = .red
+            case .microphonePermission:
+                label = t("Microphone permission needed")
+                symbol = "exclamationmark.circle.fill"
+                color = .red
+            case .cameraPermission:
+                label = t("Camera permission needed")
+                symbol = "exclamationmark.circle.fill"
+                color = .red
+            case .cameraFrame:
+                label = t("Waiting for video")
+                symbol = "clock.fill"
+                color = .orange
+            case .microphoneDevice:
+                label = t("No input device")
+                symbol = "exclamationmark.circle.fill"
+                color = .red
+            case .cameraDevice:
+                label = t("No Camera")
+                symbol = "exclamationmark.circle.fill"
+                color = .red
+            default:
+                label = t("Permission needed")
+                symbol = "exclamationmark.circle.fill"
+                color = .red
+            }
+        }
+
+        return Label(label, systemImage: symbol)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(color)
+            .lineLimit(1)
+            .fixedSize()
     }
 
     private var ratioMenu: some View {

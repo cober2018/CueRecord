@@ -13,3 +13,7 @@ The progress controller SHALL expose tracking, uncertain, and lost states and SH
 #### Scenario: No match for 1.5 seconds
 - **WHEN** speech is present but no trusted alignment exists for at least 1.5 seconds
 - **THEN** the controller SHALL freeze the current committed position and enter lost/uncertain recovery rather than auto-scrolling blindly
+
+#### Scenario: Recovery state is visible
+- **WHEN** alignment enters uncertain or lost mode while ASR text continues updating
+- **THEN** the teleprompter SHALL show a compact human-readable tracking status and keep tap-to-anchor available

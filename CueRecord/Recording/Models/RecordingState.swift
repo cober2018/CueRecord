@@ -2,6 +2,54 @@ import Combine
 import CoreGraphics
 import Foundation
 
+nonisolated enum RecordingReadinessBlocker: Equatable, Sendable {
+    case screenPermission
+    case microphonePermission
+    case microphoneDevice
+    case cameraPermission
+    case cameraDevice
+    case cameraFrame
+}
+
+nonisolated struct RecordingReadiness: Equatable, Sendable {
+    let screenAuthorized: Bool
+    let microphoneEnabled: Bool
+    let microphoneAuthorized: Bool
+    let microphoneAvailable: Bool
+    let cameraEnabled: Bool
+    let cameraAuthorized: Bool
+    let cameraAvailable: Bool
+    let cameraFrameReady: Bool
+
+    var blockers: [RecordingReadinessBlocker] {
+        var result: [RecordingReadinessBlocker] = []
+        if !screenAuthorized {
+            result.append(.screenPermission)
+        }
+        if microphoneEnabled {
+            if !microphoneAuthorized {
+                result.append(.microphonePermission)
+            } else if !microphoneAvailable {
+                result.append(.microphoneDevice)
+            }
+        }
+        if cameraEnabled {
+            if !cameraAuthorized {
+                result.append(.cameraPermission)
+            } else if !cameraAvailable {
+                result.append(.cameraDevice)
+            } else if !cameraFrameReady {
+                result.append(.cameraFrame)
+            }
+        }
+        return result
+    }
+
+    var isReady: Bool {
+        blockers.isEmpty
+    }
+}
+
 // MARK: - 导入音频相关模块
 // 注意：AudioManager会在后续集成时导入
 

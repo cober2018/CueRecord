@@ -79,6 +79,45 @@ func testRecordingTimeline() throws {
     try expect(timeline.map(seconds(100.040), source: .systemAudio) == seconds(0.040), "System-audio recordings should map on the shared timeline")
 }
 
+func testRecordingReadiness() throws {
+    let ready = RecordingReadiness(
+        screenAuthorized: true,
+        microphoneEnabled: true,
+        microphoneAuthorized: true,
+        microphoneAvailable: true,
+        cameraEnabled: true,
+        cameraAuthorized: true,
+        cameraAvailable: true,
+        cameraFrameReady: true
+    )
+    try expect(ready.isReady, "All enabled recording sources should be ready")
+
+    let optionalSourcesOff = RecordingReadiness(
+        screenAuthorized: true,
+        microphoneEnabled: false,
+        microphoneAuthorized: false,
+        microphoneAvailable: false,
+        cameraEnabled: false,
+        cameraAuthorized: false,
+        cameraAvailable: false,
+        cameraFrameReady: false
+    )
+    try expect(optionalSourcesOff.isReady, "Disabled optional sources must not block recording")
+
+    let cameraWaiting = RecordingReadiness(
+        screenAuthorized: true,
+        microphoneEnabled: false,
+        microphoneAuthorized: false,
+        microphoneAvailable: false,
+        cameraEnabled: true,
+        cameraAuthorized: true,
+        cameraAvailable: true,
+        cameraFrameReady: false
+    )
+    try expect(!cameraWaiting.isReady, "An enabled camera should not be ready before its first frame")
+    try expect(cameraWaiting.blockers == [.cameraFrame], "Camera first-frame wait should be explicit")
+}
+
 func testScriptAlignment() throws {
     let aligner = ScriptAligner(script: "大家好，今天介绍 AI【看镜头】然后导出")
     let tokens = aligner.tokens
@@ -132,6 +171,104 @@ func testScriptAlignmentReanchorsAfterFastSpeechOutrunsWindow() throws {
     try expect(
         aligner.state.committedTokenIndex >= 126,
         "Confirmed recovery should catch up beyond the normal local window"
+    )
+}
+
+func testScriptAlignmentDoesNotJumpToRepeatedTail() throws {
+    let repeatedPhrase = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"]
+    let filler = (0..<80).map { "filler\($0)" }
+    let script = (repeatedPhrase + filler + repeatedPhrase).joined(separator: " ")
+    let aligner = ScriptAligner(script: script)
+
+    let initial = aligner.consume(repeatedPhrase.joined(separator: " "), now: 0)
+    try expect(initial?.committed == true, "The first occurrence should establish progress")
+    let initialIndex = aligner.state.committedTokenIndex
+
+    _ = aligner.consume(repeatedPhrase.joined(separator: " "), now: 1.6)
+    _ = aligner.consume(repeatedPhrase.joined(separator: " "), now: 1.8)
+
+    try expect(
+        aligner.state.committedTokenIndex == initialIndex,
+        "Repeated recent speech must not re-anchor to an identical phrase at the end"
+    )
+}
+
+func testUnconfirmedLargeAlignmentBlocksLegacyFallback() throws {
+    let words = (0..<90).map { "segment\($0)marker" }
+    let aligner = ScriptAligner(script: words.joined(separator: " "))
+
+    _ = aligner.consume(words[0..<6].joined(separator: " "), now: 0)
+    guard let candidate = aligner.consume(words[30..<36].joined(separator: " "), now: 0.2) else {
+        throw TestFailure.failed("Fixture should produce a distant candidate")
+    }
+
+    try expect(!candidate.committed, "A first large candidate must wait for consensus")
+    try expect(
+        !candidate.allowsLegacyFallback,
+        "An unconfirmed large candidate must not let the legacy matcher bypass consensus"
+    )
+}
+
+func testScriptAlignmentUsesRenderedCharacterOffsets() throws {
+    let displayedScript = splitTextIntoWords("今天我们介绍AI【看镜头】然后开始").joined(separator: " ")
+    let aligner = ScriptAligner(script: displayedScript)
+
+    guard let result = aligner.consume("今天我们", now: 0), result.committed else {
+        throw TestFailure.failed("Fixture should establish committed CJK progress")
+    }
+    guard let spokenRange = displayedScript.range(of: "们") else {
+        throw TestFailure.failed("Fixture should contain the committed display token")
+    }
+
+    let expectedOffset = displayedScript.distance(from: displayedScript.startIndex, to: spokenRange.upperBound)
+    try expect(
+        aligner.displayOffset(afterTokenIndex: result.candidateTokenIndex) == expectedOffset,
+        "Committed progress must include rendered separators in its character offset"
+    )
+}
+
+func testScriptAlignmentManualDisplayReanchor() throws {
+    let displayedScript = splitTextIntoWords("第一句结束。第二句从这里继续。第三句收尾。").joined(separator: " ")
+    let aligner = ScriptAligner(script: displayedScript)
+    guard let anchorRange = displayedScript.range(of: "这") else {
+        throw TestFailure.failed("Fixture should contain the manual anchor token")
+    }
+    let anchorOffset = displayedScript.distance(from: displayedScript.startIndex, to: anchorRange.lowerBound)
+
+    aligner.reanchor(displayOffset: anchorOffset)
+
+    try expect(
+        aligner.tokens[aligner.state.committedTokenIndex].raw == "这",
+        "Manual display anchor must move the token aligner to the tapped word"
+    )
+    let continued = aligner.consume("这里继续", now: 0.2)
+    try expect(continued?.committed == true, "Speech after a manual anchor should continue from the tapped location")
+}
+
+func testFastSpeechRecoveryThroughPartialGate() throws {
+    let words = (0..<180).map { "term\($0)" }
+    let aligner = ScriptAligner(script: words.joined(separator: " "))
+    var gate = ASRPartialResultGate(minimumInterval: 0.12)
+
+    let initial = words[0..<6].joined(separator: " ")
+    if gate.accepts(initial, at: 0) {
+        _ = aligner.consume(initial, now: 0)
+    }
+    let initialIndex = aligner.state.committedTokenIndex
+
+    let firstLaterPartial = words[120..<126].joined(separator: " ")
+    let expandedLaterPartial = words[120..<127].joined(separator: " ")
+    if gate.accepts(firstLaterPartial, at: 1.6) {
+        _ = aligner.consume(firstLaterPartial, now: 1.6)
+    }
+    if gate.accepts(expandedLaterPartial, at: 1.8) {
+        _ = aligner.consume(expandedLaterPartial, now: 1.8)
+    }
+
+    try expect(initialIndex > 0, "Initial delivered partial should establish progress")
+    try expect(
+        aligner.state.committedTokenIndex >= 126,
+        "Changed delivered partials should safely recover beyond the normal look-ahead"
     )
 }
 
@@ -663,9 +800,15 @@ func testSpeechTrackingThreeCJKAnchorCrossesBreakTokens() throws {
 let tests: [(String, () throws -> Void)] = [
     ("AudioStartGate", testAudioStartGate),
     ("RecordingTimeline", testRecordingTimeline),
+    ("RecordingReadiness", testRecordingReadiness),
     ("ScriptAlignment", testScriptAlignment),
     ("ScriptAlignmentCumulativePartialsKeepAdvancing", testScriptAlignmentCumulativePartialsKeepAdvancing),
     ("ScriptAlignmentReanchorsAfterFastSpeechOutrunsWindow", testScriptAlignmentReanchorsAfterFastSpeechOutrunsWindow),
+    ("UnconfirmedLargeAlignmentBlocksLegacyFallback", testUnconfirmedLargeAlignmentBlocksLegacyFallback),
+    ("ScriptAlignmentDoesNotJumpToRepeatedTail", testScriptAlignmentDoesNotJumpToRepeatedTail),
+    ("ScriptAlignmentUsesRenderedCharacterOffsets", testScriptAlignmentUsesRenderedCharacterOffsets),
+    ("ScriptAlignmentManualDisplayReanchor", testScriptAlignmentManualDisplayReanchor),
+    ("FastSpeechRecoveryThroughPartialGate", testFastSpeechRecoveryThroughPartialGate),
     ("BoundedDropOldestBuffer", testBoundedDropOldestBuffer),
     ("CameraWriterIngress", testCameraWriterIngress),
     ("RecordingMasterRange", testRecordingMasterRange),

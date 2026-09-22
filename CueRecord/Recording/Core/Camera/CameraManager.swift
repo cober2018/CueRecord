@@ -12,6 +12,7 @@ struct CameraDevice: Identifiable, Hashable {
 class CameraManager: NSObject, ObservableObject {
     @Published var isAvailable = false
     @Published var isCapturing = false
+    @Published private(set) var hasReceivedFrame = false
     @Published var availableCameras: [CameraDevice] = []
     @Published var selectedCameraID = ""
     
@@ -164,6 +165,7 @@ class CameraManager: NSObject, ObservableObject {
         
         print("📷 启动摄像头捕获...")
         frameBuffer.clear()
+        hasReceivedFrame = false
         
         // 创建捕获会话
         let session = AVCaptureSession()
@@ -246,6 +248,7 @@ class CameraManager: NSObject, ObservableObject {
         videoOutput = nil
         activeCameraID = nil
         frameBuffer.clear()
+        hasReceivedFrame = false
         
         isCapturing = false
         isStartingCapture = false
@@ -489,6 +492,9 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
                 timestamp: timestamp,
                 enqueue: !hasRecordingConsumer
             )
+            if !hasReceivedFrame {
+                hasReceivedFrame = true
+            }
         }
     }
 }

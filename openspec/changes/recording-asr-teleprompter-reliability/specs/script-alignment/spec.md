@@ -28,3 +28,29 @@ The aligner SHALL require consensus for large forward jumps and SHALL enter lost
 #### Scenario: Fast speech outruns the local window
 - **WHEN** live ASR continues updating with a distinctive later phrase beyond the normal local look-ahead
 - **THEN** the aligner SHALL enter recovery, widen the bounded forward search, and commit the later phrase only after high-confidence consecutive agreement
+
+#### Scenario: Recently spoken phrase repeats near the end
+- **WHEN** the current ASR tail matches text immediately behind the committed position and an identical phrase appears much later or at the end of the script
+- **THEN** the aligner SHALL keep the nearer position and SHALL NOT mark the distant duplicate or the whole script as completed
+
+### Requirement: Exact display-coordinate projection
+Committed token progress SHALL project to the same character coordinate space used by the rendered teleprompter text, including inserted token separators and skipped stage annotations.
+
+#### Scenario: CJK display separators
+- **WHEN** the rendered script is produced by joining CJK display tokens with spaces
+- **THEN** a committed alignment SHALL end at the matching rendered token boundary rather than a raw-token character count
+
+#### Scenario: Explicit user anchor
+- **WHEN** the user taps a rendered word to continue from that location
+- **THEN** both the visible highlight and the aligner's committed token anchor SHALL move to the tapped location before later ASR partials are processed
+
+### Requirement: Delivered partial integration
+Alignment recovery SHALL work with the actual partial-result delivery rules, including duplicate suppression and throttling.
+
+#### Scenario: Fast speech recovery through the partial gate
+- **WHEN** a later cumulative partial changes after the throttle interval and points beyond the normal look-ahead window
+- **THEN** the delivered partials SHALL still establish guarded consensus and re-anchor without requiring an identical duplicate result
+
+#### Scenario: Unconfirmed large jump reaches legacy fallback
+- **WHEN** the token aligner produces a large forward candidate that has not passed consensus
+- **THEN** the legacy matcher SHALL NOT bypass that guard before the aligner enters lost mode

@@ -31,6 +31,8 @@ struct RecordingSettingsView: View {
             VStack(alignment: .leading, spacing: 14) {
                 permissionsSection
 
+                readinessSection
+
                 Divider()
 
                 recordingControls
@@ -130,6 +132,81 @@ struct RecordingSettingsView: View {
                 }
             }
             .disabled(recordingState.isRecording || controller.isStarting)
+        }
+    }
+
+    private var readinessSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(t("Preflight"))
+                .font(.system(size: 13, weight: .semibold))
+
+            readinessRow(
+                t("Screen capture"),
+                state: permissionsManager.screenRecordingAuthorized ? .ready : .blocked(t("Permission needed"))
+            )
+            readinessRow(t("Microphone input"), state: microphoneReadiness)
+            readinessRow(t("Camera video"), state: cameraReadiness)
+        }
+    }
+
+    private var microphoneReadiness: ReadinessRowState {
+        guard recordingState.microphoneEnabled else { return .off }
+        guard permissionsManager.microphoneAuthorized else { return .blocked(t("Permission needed")) }
+        guard audioManager.hasAvailableMicrophone else {
+            return .blocked(t("No input device"))
+        }
+        return .ready
+    }
+
+    private var cameraReadiness: ReadinessRowState {
+        guard recordingState.cameraOverlayEnabled else { return .off }
+        guard permissionsManager.cameraAuthorized else { return .blocked(t("Permission needed")) }
+        guard !cameraManager.availableCameras.isEmpty else { return .blocked(t("No Camera")) }
+        return cameraManager.hasReceivedFrame ? .ready : .waiting(t("Waiting for video"))
+    }
+
+    private func readinessRow(_ label: String, state: ReadinessRowState) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: state.symbolName)
+                .foregroundStyle(state.color)
+            Text(label)
+            Spacer()
+            Text(state.text)
+                .foregroundStyle(.secondary)
+        }
+        .font(.system(size: 11, weight: .medium))
+    }
+
+    private enum ReadinessRowState {
+        case ready
+        case off
+        case waiting(String)
+        case blocked(String)
+
+        var symbolName: String {
+            switch self {
+            case .ready: "checkmark.circle.fill"
+            case .off: "minus.circle"
+            case .waiting: "clock.fill"
+            case .blocked: "exclamationmark.circle.fill"
+            }
+        }
+
+        var color: Color {
+            switch self {
+            case .ready: .green
+            case .off: .secondary
+            case .waiting: .orange
+            case .blocked: .red
+            }
+        }
+
+        var text: String {
+            switch self {
+            case .ready: uiText("Ready")
+            case .off: uiText("Off")
+            case .waiting(let text), .blocked(let text): text
+            }
         }
     }
 

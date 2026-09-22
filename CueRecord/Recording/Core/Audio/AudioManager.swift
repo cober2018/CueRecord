@@ -28,6 +28,11 @@ class AudioManager: ObservableObject {
     @Published var selectedMicrophone: AudioDevice = AudioDevice.defaultDevice
     @Published var isLoading = false
 
+    var hasAvailableMicrophone: Bool {
+        AVCaptureDevice.default(for: .audio) != nil
+            || availableMicrophones.contains { $0.id != AudioDevice.defaultDevice.id }
+    }
+
     private var audioDeviceListener: AudioObjectPropertyListenerBlock?
     private var refreshTask: Task<Void, Never>?
     

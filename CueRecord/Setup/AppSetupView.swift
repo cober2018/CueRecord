@@ -101,7 +101,11 @@ struct AppSetupView: View {
             selectedVaultURL = service.vaultURL
             await refreshPermissions()
             if permissionsManager.allPermissionsGranted {
-                currentStep = .workspace
+                if selectedVaultURL != nil {
+                    finishSetup()
+                } else {
+                    currentStep = .workspace
+                }
             } else {
                 currentPermissionPage = firstIncompletePermissionPage ?? .microphone
             }

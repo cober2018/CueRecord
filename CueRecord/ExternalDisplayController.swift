@@ -265,12 +265,18 @@ struct ExternalDisplayView: View {
                     .frame(width: 240, height: 32)
 
                     if listeningMode == .wordTracking {
-                        Text(speechRecognizer.lastSpokenText.split(separator: " ").suffix(5).joined(separator: " "))
-                            .font(.system(size: 18, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.5))
-                            .lineLimit(1)
-                            .truncationMode(.head)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                        VStack(alignment: .leading, spacing: 2) {
+                            if let status = speechRecognizer.alignmentStatusText {
+                                Text(status)
+                                    .foregroundStyle(.orange.opacity(0.9))
+                            }
+                            Text(speechRecognizer.lastSpokenText.split(separator: " ").suffix(5).joined(separator: " "))
+                                .foregroundStyle(.white.opacity(0.5))
+                        }
+                        .font(.system(size: 18, weight: .medium))
+                        .lineLimit(1)
+                        .truncationMode(.head)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     } else {
                         Spacer()
                     }

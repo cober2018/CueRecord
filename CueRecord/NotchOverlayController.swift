@@ -953,12 +953,18 @@ struct NotchOverlayView: View {
                     .clipped()
 
                     if listeningMode == .wordTracking {
-                        Text(speechRecognizer.lastSpokenText.split(separator: " ").suffix(3).joined(separator: " "))
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.5))
-                            .lineLimit(1)
-                            .truncationMode(.head)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                        VStack(alignment: .leading, spacing: 1) {
+                            if let status = speechRecognizer.alignmentStatusText {
+                                Text(status)
+                                    .foregroundStyle(.orange.opacity(0.9))
+                            }
+                            Text(speechRecognizer.lastSpokenText.split(separator: " ").suffix(3).joined(separator: " "))
+                                .foregroundStyle(.white.opacity(0.5))
+                        }
+                        .font(.system(size: 11, weight: .medium))
+                        .lineLimit(1)
+                        .truncationMode(.head)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     } else {
                         Spacer(minLength: 0)
                     }
@@ -1429,12 +1435,18 @@ struct FloatingOverlayView: View {
                 .frame(width: 160, height: 24)
 
                 if listeningMode == .wordTracking {
-                    Text(speechRecognizer.lastSpokenText.split(separator: " ").suffix(3).joined(separator: " "))
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.5))
-                        .lineLimit(1)
-                        .truncationMode(.head)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    VStack(alignment: .leading, spacing: 1) {
+                        if let status = speechRecognizer.alignmentStatusText {
+                            Text(status)
+                                .foregroundStyle(.orange.opacity(0.9))
+                        }
+                        Text(speechRecognizer.lastSpokenText.split(separator: " ").suffix(3).joined(separator: " "))
+                            .foregroundStyle(.white.opacity(0.5))
+                    }
+                    .font(.system(size: 11, weight: .medium))
+                    .lineLimit(1)
+                    .truncationMode(.head)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 } else {
                     Spacer()
                 }

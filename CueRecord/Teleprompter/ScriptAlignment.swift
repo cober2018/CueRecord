@@ -5,6 +5,7 @@ nonisolated struct ScriptToken: Identifiable, Equatable, Sendable {
     let raw: String
     let normalized: String
     let spoken: Bool
+    let displayEndOffset: Int
 }
 
 nonisolated enum ScriptAlignmentMode: Sendable, Equatable {
@@ -25,9 +26,10 @@ nonisolated struct ScriptAlignmentResult: Sendable, Equatable {
     let score: Double
     let committed: Bool
     let mode: ScriptAlignmentMode
+    let isLargeJump: Bool
 
     var allowsLegacyFallback: Bool {
-        mode != .lost
+        mode != .lost && !isLargeJump
     }
 }
 
@@ -41,7 +43,9 @@ nonisolated enum ScriptNormalizer {
     static func tokenize(_ text: String) -> [ScriptToken] {
         var result: [ScriptToken] = []
         var buffer = ""
+        var bufferEndOffset = 0
         var inAnnotation = false
+        var displayOffset = 0
 
         func flush(spoken: Bool = true) {
             guard !buffer.isEmpty else { return }
@@ -49,31 +53,51 @@ nonisolated enum ScriptNormalizer {
             buffer = ""
             let normalized = normalize(raw)
             guard !normalized.isEmpty else { return }
-            result.append(ScriptToken(id: result.count, raw: raw, normalized: normalized, spoken: spoken))
+            result.append(
+                ScriptToken(
+                    id: result.count,
+                    raw: raw,
+                    normalized: normalized,
+                    spoken: spoken,
+                    displayEndOffset: bufferEndOffset
+                )
+            )
         }
 
         for character in text {
             if ["[", "【", "（"].contains(character) {
                 flush()
                 inAnnotation = true
+                displayOffset += 1
                 continue
             }
             if inAnnotation {
                 if ["]", "】", "）"].contains(character) {
                     inAnnotation = false
                 }
+                displayOffset += 1
                 continue
             }
 
             let isCJK = character.unicodeScalars.first?.isCJK == true
             if isCJK {
                 flush()
-                result.append(ScriptToken(id: result.count, raw: String(character), normalized: normalize(String(character)), spoken: true))
+                result.append(
+                    ScriptToken(
+                        id: result.count,
+                        raw: String(character),
+                        normalized: normalize(String(character)),
+                        spoken: true,
+                        displayEndOffset: displayOffset + 1
+                    )
+                )
             } else if character.isLetter || character.isNumber {
                 buffer.append(character)
+                bufferEndOffset = displayOffset + 1
             } else {
                 flush()
             }
+            displayOffset += 1
         }
         flush(spoken: !inAnnotation)
         return result
@@ -109,7 +133,8 @@ nonisolated final class ScriptAligner {
             ?? untrustedSince.map { now - $0 }
             ?? 0
         let isRecovering = state.mode == .lost || elapsedWithoutTrust >= lostTimeout
-        let lowerBound = max(0, state.committedTokenIndex - 3)
+        let lookBehind = max(3, observed.count + 3)
+        let lowerBound = max(0, state.committedTokenIndex - lookBehind)
         let lookAhead = isRecovering ? recoveryLookAhead : normalLookAhead
         let upperBound = min(tokens.count, state.committedTokenIndex + lookAhead)
         var best: (index: Int, score: Double)?
@@ -121,10 +146,11 @@ nonisolated final class ScriptAligner {
             for length in minimumLength...maximumLength {
                 let candidate = tokens[start..<(start + length)].filter(\.spoken).map(\.normalized)
                 let similarity = Self.similarity(observed, candidate)
-                let positionPrior = start >= state.committedTokenIndex ? 1.0 : 0.85
+                let candidateEnd = start + length
+                let positionPrior = candidateEnd >= state.committedTokenIndex ? 1.0 : 0.85
                 let score = similarity * 0.85 + positionPrior * 0.15
                 if best == nil || score > best!.score {
-                    best = (start + length, score)
+                    best = (candidateEnd, score)
                 }
             }
         }
@@ -154,7 +180,8 @@ nonisolated final class ScriptAligner {
             candidateTokenIndex: best.index,
             score: best.score,
             committed: trusted,
-            mode: state.mode
+            mode: state.mode,
+            isLargeJump: largeJump
         )
     }
 
@@ -167,6 +194,19 @@ nonisolated final class ScriptAligner {
         recentCandidates = [clamped]
         lastTrustedTime = nil
         untrustedSince = nil
+    }
+
+    func reanchor(displayOffset: Int) {
+        let clampedOffset = max(0, displayOffset)
+        let tokenIndex = tokens.firstIndex { $0.displayEndOffset > clampedOffset }
+            ?? tokens.count
+        reanchor(to: tokenIndex)
+    }
+
+    func displayOffset(afterTokenIndex tokenIndex: Int) -> Int {
+        let clamped = min(max(0, tokenIndex), tokens.count)
+        guard clamped > 0 else { return 0 }
+        return tokens[clamped - 1].displayEndOffset
     }
 
     private static func similarity(_ lhs: [String], _ rhs: [String]) -> Double {

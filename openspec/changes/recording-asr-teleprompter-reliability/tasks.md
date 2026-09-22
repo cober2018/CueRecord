@@ -30,9 +30,15 @@
 - [x] 5.3 Add lost/re-anchor and speculative/committed progress state transitions with unit tests for Chinese, filler words, and skipped sentences
 - [x] 5.4 Connect the progress controller to the existing teleprompter UI without moving decode/alignment work onto MainActor
 - [x] 5.5 Handle cumulative partials and fast-speech recovery with a recent-token tail, adaptive bounded search, and consecutive high-confidence re-anchor tests
+- [x] 5.6 Project committed token progress into the exact rendered-character coordinate space and re-anchor the aligner on explicit word taps
+- [x] 5.7 Expose tracking/uncertain/lost state to the teleprompter UI with compact recovery guidance
+- [x] 5.8 Add partial-gate integration coverage proving fast-speech recovery does not depend on duplicate ASR results
+- [x] 5.9 Show recording preflight readiness for the screen and enabled microphone/camera, including camera first-frame readiness
+- [x] 5.10 Prevent repeated recent speech and unconfirmed legacy fallback from committing a distant duplicate or the end of the script
+- [x] 5.11 Skip the setup wizard on relaunch when required permissions are already authorized and the workspace already exists
 
 ## 6. Verification and handoff
 
 - [x] 6.1 Run focused RecordingCore tests and a Debug Xcode build; document Git LFS/model blockers separately
-- [ ] 6.2 Run available short recording/export smoke checks and verify no-camera, system-audio, microphone, and area-recording regressions
+- [x] 6.2 Run available short recording/export smoke checks and verify no-camera, system-audio, microphone, and area-recording regressions
 - [ ] 6.3 Run 30-minute A/V and 10/30/60-minute export acceptance when hardware/assets are available; update README and archive the OpenSpec change

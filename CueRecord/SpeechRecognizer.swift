@@ -87,8 +87,21 @@ class SpeechRecognizer {
     var error: String?
     var audioLevels: [CGFloat] = Array(repeating: 0, count: 30)
     var lastSpokenText: String = ""
+    var alignmentMode: ScriptAlignmentMode = .tracking
     var shouldDismiss: Bool = false
     var shouldAdvancePage: Bool = false
+
+    var alignmentStatusText: String? {
+        guard isListening else { return nil }
+        switch alignmentMode {
+        case .tracking:
+            return nil
+        case .uncertain:
+            return uiText("Checking speech…")
+        case .lost:
+            return uiText("Finding your place… tap a word")
+        }
+    }
 
     /// True when recent audio levels indicate the user is actively speaking
     var isSpeaking: Bool {
@@ -176,18 +189,29 @@ class SpeechRecognizer {
         let collapsed = words.joined(separator: " ")
         sourceText = collapsed
         normalizedSource = Self.normalize(collapsed)
-        scriptAligner = ScriptAligner(script: text)
+        let aligner = ScriptAligner(script: collapsed)
+        aligner.reanchor(displayOffset: preservingCharCount)
+        scriptAligner = aligner
         alignmentGeneration += 1
         recognizedCharCount = min(preservingCharCount, collapsed.count)
         matchStartOffset = recognizedCharCount
         recentMatchPositions = []
+        alignmentMode = .tracking
     }
 
     /// Jump highlight to a specific char offset (e.g. when user taps a word)
     func jumpTo(charOffset: Int) {
-        recognizedCharCount = charOffset
-        matchStartOffset = charOffset
+        let clampedOffset = min(max(0, charOffset), sourceText.count)
+        recognizedCharCount = clampedOffset
+        matchStartOffset = clampedOffset
         recentMatchPositions = []
+        alignmentMode = .tracking
+        alignmentGeneration += 1
+        if let aligner = scriptAligner {
+            alignmentQueue.async {
+                aligner.reanchor(displayOffset: clampedOffset)
+            }
+        }
         if isListening {
             restartRecognition()
         }
@@ -202,11 +226,12 @@ class SpeechRecognizer {
         let collapsed = words.joined(separator: " ")
         sourceText = collapsed
         normalizedSource = Self.normalize(collapsed)
-        scriptAligner = ScriptAligner(script: text)
+        scriptAligner = ScriptAligner(script: collapsed)
         alignmentGeneration += 1
         recognizedCharCount = 0
         matchStartOffset = 0
         recentMatchPositions = []
+        alignmentMode = .tracking
         error = nil
         sessionGeneration += 1
 
@@ -251,6 +276,7 @@ class SpeechRecognizer {
         isListening = false
         sourceText = ""
         recentMatchPositions = []
+        alignmentMode = .tracking
         alignmentGeneration += 1
         cleanupRecognition()
     }
@@ -320,15 +346,15 @@ class SpeechRecognizer {
             let result = aligner.consume(spoken, now: ProcessInfo.processInfo.systemUptime)
             let candidate: Int?
             if let result, result.committed {
-                let consumedText = aligner.tokens
-                    .prefix(result.candidateTokenIndex)
-                    .map(\.raw)
-                    .joined()
-                candidate = min(consumedText.count, sourceTextCount)
+                candidate = min(
+                    aligner.displayOffset(afterTokenIndex: result.candidateTokenIndex),
+                    sourceTextCount
+                )
             } else {
                 candidate = nil
             }
             let allowsLegacyFallback = result?.allowsLegacyFallback ?? true
+            let alignmentMode = result?.mode ?? .uncertain
 
             DispatchQueue.main.async {
                 guard let self,
@@ -336,6 +362,8 @@ class SpeechRecognizer {
                       self.alignmentGeneration == alignmentGeneration else {
                     return
                 }
+
+                self.alignmentMode = alignmentMode
 
                 if let candidate, self.applyCommittedAlignedProgress(candidate) {
                     return

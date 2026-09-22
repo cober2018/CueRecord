@@ -76,6 +76,19 @@ final class RecordingController: ObservableObject {
         pendingCapturedRecording?.canRenderCameraOnly == true
     }
 
+    var recordingReadiness: RecordingReadiness {
+        RecordingReadiness(
+            screenAuthorized: permissionsManager.screenRecordingAuthorized,
+            microphoneEnabled: recordingState.microphoneEnabled,
+            microphoneAuthorized: permissionsManager.microphoneAuthorized,
+            microphoneAvailable: audioManager.hasAvailableMicrophone,
+            cameraEnabled: recordingState.cameraOverlayEnabled,
+            cameraAuthorized: permissionsManager.cameraAuthorized,
+            cameraAvailable: !cameraManager.availableCameras.isEmpty,
+            cameraFrameReady: cameraManager.hasReceivedFrame
+        )
+    }
+
     private init() {
         configureOutputDirectory()
         restoreSelectedDisplay()
@@ -185,6 +198,15 @@ final class RecordingController: ObservableObject {
     }
 
     func startPreviewedRecording(completion: @escaping (Bool) -> Void) {
+        if recordingState.cameraOverlayEnabled,
+           permissionsManager.cameraAuthorized,
+           !cameraManager.availableCameras.isEmpty,
+           !cameraManager.hasReceivedFrame {
+            lastError = uiText("Camera is still starting. Wait for the preview, then try again.")
+            completion(false)
+            return
+        }
+
         switch recordingState.captureMode {
         case .fullScreen:
             recordingState.recordingMode = .fullScreen
@@ -505,12 +527,40 @@ final class RecordingController: ObservableObject {
                 await permissionsManager.requestMicrophonePermission()
             }
 
+            if recordingState.microphoneEnabled && !permissionsManager.microphoneAuthorized {
+                isStarting = false
+                lastError = uiText("Microphone permission is required.")
+                completion?(false)
+                return
+            }
+
             if recordingState.cameraOverlayEnabled && !permissionsManager.cameraAuthorized {
                 await permissionsManager.requestCameraPermission()
             }
 
             if recordingState.cameraOverlayEnabled && !permissionsManager.cameraAuthorized {
-                recordingState.cameraOverlayEnabled = false
+                isStarting = false
+                lastError = uiText("Camera permission is required.")
+                completion?(false)
+                return
+            }
+
+            if recordingState.microphoneEnabled,
+               !audioManager.hasAvailableMicrophone {
+                isStarting = false
+                lastError = uiText("No microphone input device is available.")
+                completion?(false)
+                return
+            }
+
+            if recordingState.cameraOverlayEnabled {
+                cameraManager.refreshCameraDevices()
+                guard !cameraManager.availableCameras.isEmpty else {
+                    isStarting = false
+                    lastError = uiText("No camera device is available.")
+                    completion?(false)
+                    return
+                }
             }
 
             if case .selectedWindow = recordingState.recordingMode {
