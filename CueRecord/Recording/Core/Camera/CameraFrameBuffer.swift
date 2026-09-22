@@ -36,10 +36,11 @@ final class CameraFrameBuffer {
     @discardableResult
     func push(pixelBuffer: CVPixelBuffer, timestamp: CMTime, enqueue: Bool = true) -> CameraFrameSample {
         receivedCount += 1
-        let fallbackTimestamp = CMTime(value: CMTimeValue(receivedCount), timescale: 30)
         let frame = CameraFrameSample(
             pixelBuffer: pixelBuffer,
-            timestamp: timestamp.isValid ? timestamp : fallbackTimestamp,
+            // An invalid capture PTS must remain invalid. Replacing it with
+            // sequence/30 creates cumulative drift after a dropped frame.
+            timestamp: timestamp,
             sequence: receivedCount
         )
         latestFrame = frame

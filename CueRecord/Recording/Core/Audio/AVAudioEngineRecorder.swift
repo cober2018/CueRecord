@@ -8,6 +8,7 @@ class AVAudioEngineRecorder: NSObject {
     private var inputNode: AVAudioInputNode?
     private var audioFile: AVAudioFile?
     private var audioWriterInput: AVAssetWriterInput?
+    private var onASRBuffer: ((AVAudioPCMBuffer) -> Void)?
     private var isRecording = false
 
     // 音频缓冲区管理
@@ -80,13 +81,17 @@ class AVAudioEngineRecorder: NSObject {
     }
     
     // MARK: - 开始录制
-    func startRecording(writerInput: AVAssetWriterInput) throws {
+    func startRecording(
+        writerInput: AVAssetWriterInput,
+        onASRBuffer: ((AVAudioPCMBuffer) -> Void)? = nil
+    ) throws {
         guard let engine = audioEngine,
               let inputNode = inputNode else {
             throw RecordingError.audioSetupFailed
         }
 
         self.audioWriterInput = writerInput
+        self.onASRBuffer = onASRBuffer
         self.isRecording = true
         self.startTime = nil
         self.sampleCount = 0  // 重置样本计数器
@@ -113,6 +118,7 @@ class AVAudioEngineRecorder: NSObject {
         guard let engine = audioEngine else { return }
 
         isRecording = false
+        onASRBuffer = nil
         sampleCount = 0  // 重置样本计数器
         firstSampleTime = nil  // 重置第一个样本时间
         
@@ -127,6 +133,9 @@ class AVAudioEngineRecorder: NSObject {
     
     // MARK: - 处理音频缓冲区
     private func processAudioBuffer(_ buffer: AVAudioPCMBuffer, time: AVAudioTime) {
+        // Recognition receives the raw capture buffer before writer readiness
+        // is checked, so media backpressure cannot starve ASR.
+        onASRBuffer?(buffer)
         guard let writerInput = audioWriterInput,
               writerInput.isReadyForMoreMediaData else {
             return

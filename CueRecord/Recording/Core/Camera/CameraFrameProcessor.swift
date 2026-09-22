@@ -3,7 +3,22 @@ import CoreImage
 import CoreVideo
 import Foundation
 
-enum CameraFrameProcessor {
+nonisolated enum CameraFrameProcessor {
+    /// Preview frames do not need the recording path's black-border detection.
+    /// Keeping this path lightweight lets the first camera frame reach the UI
+    /// without scanning the entire pixel buffer on the main thread.
+    static func mirroredPreviewImage(from pixelBuffer: CVPixelBuffer) -> (image: CIImage, extent: CGRect) {
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        let extent = ciImage.extent
+        let flippedImage = ciImage.transformed(by: CGAffineTransform(scaleX: -1, y: 1))
+        let mirroredImage = flippedImage.transformed(
+            by: CGAffineTransform(translationX: extent.width, y: 0)
+        )
+        return (mirroredImage, extent)
+    }
+
+    static let previewCIContext = CIContext()
+
     static func mirroredVisibleImage(from pixelBuffer: CVPixelBuffer) -> (image: CIImage, extent: CGRect) {
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
         let cropRect = visibleContentRect(in: pixelBuffer, imageExtent: ciImage.extent)

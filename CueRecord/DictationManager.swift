@@ -19,7 +19,7 @@ class DictationManager {
     /// Called on main thread when a new recognition segment begins (after silence/restart)
     var onNewSegment: (() -> Void)?
 
-    private let asr = SherpaOnnxStreamingASR()
+    private let asr: any StreamingASRProvider = SherpaOnnxStreamingASR()
 
     // Tracks the committed text from previous recognition segments
     private var committedText: String = ""

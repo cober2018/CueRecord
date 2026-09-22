@@ -30,6 +30,18 @@ nonisolated struct RecordingMetricsSnapshot: Codable, Sendable {
     var cameraFramesReceived: UInt64
     var cameraFramesWritten: Int64
     var cameraFramesDropped: Int
+    var cameraFramesDroppedCaptureOutput: Int64
+    var cameraFramesDroppedQueueOverflow: Int64
+    var cameraFramesDroppedWriterNotReady: Int64
+    var cameraFramesDroppedNonMonotonicPTS: Int64
+    var cameraMaxPendingQueueDepth: Int
+    var cameraLastRelativePTSSeconds: Double?
+    var sessionDurationSeconds: Double?
+    var screenDurationSeconds: Double?
+    var cameraDurationSeconds: Double?
+    var audioDurationSeconds: Double?
+    var cameraAudioDriftMilliseconds: Double?
+    var screenAudioDriftMilliseconds: Double?
     var outputFileBytes: Int64?
     var outputDurationSeconds: Double?
     var exportDurationSeconds: Double?
@@ -52,7 +64,7 @@ nonisolated struct CodableMetricsRect: Codable, Equatable, Sendable {
 @MainActor
 final class RecordingMetricsRecorder {
     private var snapshot = RecordingMetricsSnapshot(
-        version: 1,
+        version: 2,
         health: .healthy,
         issues: [],
         startedAt: ISO8601DateFormatter().string(from: Date()),
@@ -73,6 +85,18 @@ final class RecordingMetricsRecorder {
         cameraFramesReceived: 0,
         cameraFramesWritten: 0,
         cameraFramesDropped: 0,
+        cameraFramesDroppedCaptureOutput: 0,
+        cameraFramesDroppedQueueOverflow: 0,
+        cameraFramesDroppedWriterNotReady: 0,
+        cameraFramesDroppedNonMonotonicPTS: 0,
+        cameraMaxPendingQueueDepth: 0,
+        cameraLastRelativePTSSeconds: nil,
+        sessionDurationSeconds: nil,
+        screenDurationSeconds: nil,
+        cameraDurationSeconds: nil,
+        audioDurationSeconds: nil,
+        cameraAudioDriftMilliseconds: nil,
+        screenAudioDriftMilliseconds: nil,
         outputFileBytes: nil,
         outputDurationSeconds: nil,
         exportDurationSeconds: nil
@@ -87,7 +111,7 @@ final class RecordingMetricsRecorder {
         pixelFormat: OSType
     ) {
         snapshot = RecordingMetricsSnapshot(
-            version: 1,
+            version: 2,
             health: .healthy,
             issues: [],
             startedAt: ISO8601DateFormatter().string(from: Date()),
@@ -108,6 +132,18 @@ final class RecordingMetricsRecorder {
             cameraFramesReceived: 0,
             cameraFramesWritten: 0,
             cameraFramesDropped: 0,
+            cameraFramesDroppedCaptureOutput: 0,
+            cameraFramesDroppedQueueOverflow: 0,
+            cameraFramesDroppedWriterNotReady: 0,
+            cameraFramesDroppedNonMonotonicPTS: 0,
+            cameraMaxPendingQueueDepth: 0,
+            cameraLastRelativePTSSeconds: nil,
+            sessionDurationSeconds: nil,
+            screenDurationSeconds: nil,
+            cameraDurationSeconds: nil,
+            audioDurationSeconds: nil,
+            cameraAudioDriftMilliseconds: nil,
+            screenAudioDriftMilliseconds: nil,
             outputFileBytes: nil,
             outputDurationSeconds: nil,
             exportDurationSeconds: nil
@@ -151,6 +187,70 @@ final class RecordingMetricsRecorder {
         snapshot.cameraFramesReceived = received
         snapshot.cameraFramesWritten = written
         snapshot.cameraFramesDropped = dropped
+    }
+
+    func recordCameraDrop(_ reason: CameraDropReason) {
+        switch reason {
+        case .captureOutput: snapshot.cameraFramesDroppedCaptureOutput += 1
+        case .queueOverflow: snapshot.cameraFramesDroppedQueueOverflow += 1
+        case .writerNotReady: snapshot.cameraFramesDroppedWriterNotReady += 1
+        case .nonMonotonicPTS: snapshot.cameraFramesDroppedNonMonotonicPTS += 1
+        }
+        snapshot.cameraFramesDropped = Int(
+            snapshot.cameraFramesDroppedCaptureOutput
+                + snapshot.cameraFramesDroppedQueueOverflow
+                + snapshot.cameraFramesDroppedWriterNotReady
+                + snapshot.cameraFramesDroppedNonMonotonicPTS
+        )
+    }
+
+    func setDurations(
+        session: Double?,
+        screen: Double?,
+        camera: Double?,
+        audio: Double?,
+        cameraAudioDriftMilliseconds: Double?,
+        screenAudioDriftMilliseconds: Double?
+    ) {
+        snapshot.sessionDurationSeconds = session
+        snapshot.screenDurationSeconds = screen
+        snapshot.cameraDurationSeconds = camera
+        snapshot.audioDurationSeconds = audio
+        snapshot.cameraAudioDriftMilliseconds = cameraAudioDriftMilliseconds
+        snapshot.screenAudioDriftMilliseconds = screenAudioDriftMilliseconds
+    }
+
+    func setCameraWriterState(maxPendingQueueDepth: Int, lastRelativePTSSeconds: Double?) {
+        snapshot.cameraMaxPendingQueueDepth = max(snapshot.cameraMaxPendingQueueDepth, maxPendingQueueDepth)
+        snapshot.cameraLastRelativePTSSeconds = lastRelativePTSSeconds
+    }
+
+    func applyCameraWriterSnapshot(
+        received: UInt64,
+        previewDropped: Int,
+        framesWritten: Int64,
+        droppedQueueOverflow: Int64,
+        droppedWriterNotReady: Int64,
+        droppedNonMonotonicPTS: Int64,
+        maxPendingQueueDepth: Int,
+        lastRelativePTSSeconds: Double?
+    ) {
+        snapshot.cameraFramesReceived = received
+        snapshot.cameraFramesWritten = framesWritten
+        snapshot.cameraFramesDroppedCaptureOutput = Int64(previewDropped)
+        snapshot.cameraFramesDroppedQueueOverflow = droppedQueueOverflow
+        snapshot.cameraFramesDroppedWriterNotReady = droppedWriterNotReady
+        snapshot.cameraFramesDroppedNonMonotonicPTS = droppedNonMonotonicPTS
+        snapshot.cameraFramesDropped = Int(
+            snapshot.cameraFramesDroppedCaptureOutput
+                + snapshot.cameraFramesDroppedQueueOverflow
+                + snapshot.cameraFramesDroppedWriterNotReady
+                + snapshot.cameraFramesDroppedNonMonotonicPTS
+        )
+        setCameraWriterState(
+            maxPendingQueueDepth: maxPendingQueueDepth,
+            lastRelativePTSSeconds: lastRelativePTSSeconds
+        )
     }
 
     func applyValidation(_ validation: RecordingOutputValidation) {
@@ -204,4 +304,11 @@ final class RecordingMetricsRecorder {
         }
         return "\(value)"
     }
+}
+
+nonisolated enum CameraDropReason: Sendable {
+    case captureOutput
+    case queueOverflow
+    case writerNotReady
+    case nonMonotonicPTS
 }

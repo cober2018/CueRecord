@@ -26,7 +26,7 @@ class CameraManager: NSObject, ObservableObject {
     private let ciContext = CIContext()
     private var deviceObservers: [NSObjectProtocol] = []
     private var refreshWorkItem: DispatchWorkItem?
-    private var recordingFrameHandler: ((CameraFrameSample) -> Void)?
+    private let recordingSink = CameraRecordingSink()
     private var captureGeneration: UInt64 = 0
     private var activeCameraID: String?
     private static let firstFrameTimeout: TimeInterval = 4.0
@@ -267,7 +267,7 @@ class CameraManager: NSObject, ObservableObject {
     }
 
     func setRecordingFrameHandler(_ handler: ((CameraFrameSample) -> Void)?) {
-        recordingFrameHandler = handler
+        recordingSink.setHandler(handler)
     }
 
     var receivedFrameCount: UInt64 {
@@ -474,18 +474,21 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        
-        // 更新当前帧
+
+        // Raw recording enters its own bounded writer before the preview hops
+        // to MainActor, preventing busy UI work from stalling AVAssetWriter.
+        recordingSink.deliver(pixelBuffer: pixelBuffer, timestamp: timestamp)
+
+        // Preview state remains MainActor-owned and is intentionally lossy.
         Task { @MainActor in
             guard let currentOutput = videoOutput, output === currentOutput else { return }
 
-            let hasRecordingConsumer = recordingFrameHandler != nil
-            let frame = frameBuffer.push(
+            let hasRecordingConsumer = recordingSink.isActive
+            _ = frameBuffer.push(
                 pixelBuffer: pixelBuffer,
                 timestamp: timestamp,
                 enqueue: !hasRecordingConsumer
             )
-            recordingFrameHandler?(frame)
         }
     }
 }

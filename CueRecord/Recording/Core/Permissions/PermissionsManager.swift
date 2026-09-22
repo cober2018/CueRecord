@@ -40,13 +40,10 @@ class PermissionsManager: ObservableObject {
             let preflightGranted = CGPreflightScreenCaptureAccess()
             print("📺 CoreGraphics 屏幕录制预检: \(preflightGranted ? "已授权" : "未授权")")
 
-            guard preflightGranted else {
-                screenRecordingAuthorized = false
-                return
-            }
-
             do {
-                // 尝试获取屏幕内容来验证 ScreenCaptureKit 在当前系统上的实际可用性。
+                // On recent macOS releases the legacy CoreGraphics preflight can
+                // temporarily report false while ScreenCaptureKit is already usable.
+                // Treat an actual ScreenCaptureKit content query as the authority.
                 let availableContent = try await SCShareableContent.excludingDesktopWindows(
                     false,
                     onScreenWindowsOnly: true
@@ -70,8 +67,8 @@ class PermissionsManager: ObservableObject {
             screenRecordingAuthorized = false
             print("⚠️  系统版本过低，不支持ScreenCaptureKit")
         }
-    }
-    
+        }
+
     func requestScreenRecordingPermission() async {
         print("📺 请求屏幕录制权限...")
         guard #available(macOS 12.3, *) else {
@@ -81,6 +78,11 @@ class PermissionsManager: ObservableObject {
         }
 
         prepareForScreenRecordingPrompt()
+
+        await checkScreenRecordingPermission()
+        if screenRecordingAuthorized {
+            return
+        }
 
         if CGPreflightScreenCaptureAccess() {
             await checkScreenRecordingPermission()

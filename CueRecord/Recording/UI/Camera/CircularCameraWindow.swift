@@ -587,7 +587,7 @@ struct CameraOverlayView: View {
             return
         }
 
-        let processedImage = CameraFrameProcessor.mirroredVisibleImage(from: pixelBuffer)
+        let processedImage = CameraFrameProcessor.mirroredPreviewImage(from: pixelBuffer)
 
         if shape == .roundedSquare {
             let aspectRatio = processedImage.extent.width / max(processedImage.extent.height, 1)
@@ -596,10 +596,19 @@ struct CameraOverlayView: View {
             }
         }
         
-        // 转换CVPixelBuffer到NSImage
-        let context = CIContext()
-        if let cgImage = context.createCGImage(processedImage.image, from: processedImage.extent) {
-            currentImage = NSImage(cgImage: cgImage, size: processedImage.extent.size)
+        // Preview only needs the size of the camera overlay. Rendering a smaller
+        // image keeps the main thread responsive while the first frame arrives.
+        let targetSize = currentContentSize
+        let scale = min(
+            targetSize.width / max(processedImage.extent.width, 1),
+            targetSize.height / max(processedImage.extent.height, 1)
+        )
+        let previewImage = processedImage.image.transformed(
+            by: CGAffineTransform(scaleX: max(scale, 0.01), y: max(scale, 0.01))
+        )
+        let previewExtent = previewImage.extent
+        if let cgImage = CameraFrameProcessor.previewCIContext.createCGImage(previewImage, from: previewExtent) {
+            currentImage = NSImage(cgImage: cgImage, size: previewExtent.size)
         }
     }
 }

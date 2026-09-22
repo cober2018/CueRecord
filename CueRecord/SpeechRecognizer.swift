@@ -98,15 +98,28 @@ class SpeechRecognizer {
         return avg > 0.08
     }
 
-    private let asr = SherpaOnnxStreamingASR()
+    private let asr: any StreamingASRProvider = SherpaOnnxStreamingASR()
     private var sourceText: String = ""
     private var normalizedSource: String = ""
     private var matchStartOffset: Int = 0  // char offset to start matching from
     private var sessionGeneration: Int = 0
+    private var alignmentGeneration: Int = 0
     /// Sliding window of recent match positions for confidence gating.
     /// Larger jumps still need agreement, but short or anchored partial hits
     /// should move immediately so streaming ASR feels responsive.
     private var recentMatchPositions: [Int] = []
+    private var scriptAligner: ScriptAligner?
+    private let alignmentQueue = DispatchQueue(label: "com.nolanlai.cuerecord.teleprompter-alignment")
+    private let asrAudioInputBridge = ASRAudioInputBridge.shared
+    private var usesRecordingInput = false
+
+    init() {
+        asrAudioInputBridge.setStateHandler { [weak self] isActive in
+            DispatchQueue.main.async {
+                self?.recordingInputAvailabilityDidChange(isActive)
+            }
+        }
+    }
 
     private struct RecoveryAnchorResult {
         let endOffset: Int
@@ -163,6 +176,8 @@ class SpeechRecognizer {
         let collapsed = words.joined(separator: " ")
         sourceText = collapsed
         normalizedSource = Self.normalize(collapsed)
+        scriptAligner = ScriptAligner(script: text)
+        alignmentGeneration += 1
         recognizedCharCount = min(preservingCharCount, collapsed.count)
         matchStartOffset = recognizedCharCount
         recentMatchPositions = []
@@ -187,6 +202,8 @@ class SpeechRecognizer {
         let collapsed = words.joined(separator: " ")
         sourceText = collapsed
         normalizedSource = Self.normalize(collapsed)
+        scriptAligner = ScriptAligner(script: text)
+        alignmentGeneration += 1
         recognizedCharCount = 0
         matchStartOffset = 0
         recentMatchPositions = []
@@ -234,6 +251,7 @@ class SpeechRecognizer {
         isListening = false
         sourceText = ""
         recentMatchPositions = []
+        alignmentGeneration += 1
         cleanupRecognition()
     }
 
@@ -245,6 +263,8 @@ class SpeechRecognizer {
     }
 
     private func cleanupRecognition() {
+        asrAudioInputBridge.detach()
+        usesRecordingInput = false
         asr.stop()
     }
 
@@ -255,7 +275,7 @@ class SpeechRecognizer {
         asr.onTextUpdate = { [weak self] spoken in
             guard let self, self.sessionGeneration == currentGeneration else { return }
             self.lastSpokenText = spoken
-            self.matchCharacters(spoken: spoken)
+            self.enqueueAlignment(spoken: spoken, sessionGeneration: currentGeneration)
         }
         asr.onNewSegment = { [weak self] in
             guard let self, self.sessionGeneration == currentGeneration else { return }
@@ -275,7 +295,69 @@ class SpeechRecognizer {
         }
 
         isListening = true
-        asr.start(selectedMicUID: NotchSettings.shared.selectedMicUID)
+        let provider = asr
+        let usesRecordingInput = asrAudioInputBridge.attach { buffer in
+            provider.submitExternalAudio(buffer)
+        }
+        self.usesRecordingInput = usesRecordingInput
+        if usesRecordingInput {
+            asr.startExternalInput()
+        } else {
+            asrAudioInputBridge.detach()
+            asr.start(selectedMicUID: NotchSettings.shared.selectedMicUID)
+        }
+    }
+
+    private func enqueueAlignment(spoken: String, sessionGeneration: Int) {
+        guard let aligner = scriptAligner else {
+            matchCharacters(spoken: spoken)
+            return
+        }
+
+        let alignmentGeneration = alignmentGeneration
+        let sourceTextCount = sourceText.count
+        alignmentQueue.async { [weak self] in
+            let result = aligner.consume(spoken, now: ProcessInfo.processInfo.systemUptime)
+            let candidate: Int?
+            if let result, result.committed {
+                let consumedText = aligner.tokens
+                    .prefix(result.candidateTokenIndex)
+                    .map(\.raw)
+                    .joined()
+                candidate = min(consumedText.count, sourceTextCount)
+            } else {
+                candidate = nil
+            }
+            let allowsLegacyFallback = result?.allowsLegacyFallback ?? true
+
+            DispatchQueue.main.async {
+                guard let self,
+                      self.sessionGeneration == sessionGeneration,
+                      self.alignmentGeneration == alignmentGeneration else {
+                    return
+                }
+
+                if let candidate, self.applyCommittedAlignedProgress(candidate) {
+                    return
+                }
+                if allowsLegacyFallback {
+                    self.matchCharacters(spoken: spoken)
+                }
+            }
+        }
+    }
+
+    private func applyCommittedAlignedProgress(_ candidate: Int) -> Bool {
+        guard candidate > recognizedCharCount else { return candidate > 0 }
+        recognizedCharCount = candidate
+        matchStartOffset = candidate
+        recentMatchPositions = [candidate]
+        return true
+    }
+
+    private func recordingInputAvailabilityDidChange(_ isAvailable: Bool) {
+        guard isListening, isAvailable != usesRecordingInput else { return }
+        beginRecognition()
     }
 
     private func restartRecognition() {

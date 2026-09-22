@@ -59,7 +59,7 @@ enum ASRError: LocalizedError {
     }
 }
 
-final class SherpaOnnxStreamingASR {
+nonisolated final class SherpaOnnxStreamingASR {
     var onTextUpdate: ((String) -> Void)?
     var onNewSegment: (() -> Void)?
     var onLevelUpdate: ((CGFloat) -> Void)?
@@ -75,13 +75,17 @@ final class SherpaOnnxStreamingASR {
     private var targetFormat: AVAudioFormat?
     private var pendingSamples: [Float] = []
     private var lastText = ""
+    private var partialResultGate = ASRPartialResultGate()
+    private var runtimeMetrics = ASRRuntimeMetrics()
     private var isRunning = false
+    private var usesRecordingInput = false
     private var configurationChangeObserver: Any?
     private var suppressConfigChange = false
 
     func start(selectedMicUID: String) {
         stop()
         isRunning = true
+        usesRecordingInput = false
 
         do {
             try createRecognizer()
@@ -96,6 +100,8 @@ final class SherpaOnnxStreamingASR {
                 recognizer = nil
                 pendingSamples.removeAll()
                 lastText = ""
+                partialResultGate.reset()
+                runtimeMetrics = ASRRuntimeMetrics()
             }
             DispatchQueue.main.async { [weak self] in
                 self?.onError?(error.localizedDescription)
@@ -103,14 +109,48 @@ final class SherpaOnnxStreamingASR {
         }
     }
 
+    func startExternalInput() {
+        stop()
+        isRunning = true
+        usesRecordingInput = true
+
+        do {
+            try createRecognizer()
+            DispatchQueue.main.async { [weak self] in
+                self?.onNewSegment?()
+            }
+        } catch {
+            isRunning = false
+            usesRecordingInput = false
+            decodeQueue.sync {
+                recognizer = nil
+                pendingSamples.removeAll()
+                lastText = ""
+                partialResultGate.reset()
+                runtimeMetrics = ASRRuntimeMetrics()
+            }
+            DispatchQueue.main.async { [weak self] in
+                self?.onError?(error.localizedDescription)
+            }
+        }
+    }
+
+    func submitExternalAudio(_ buffer: AVAudioPCMBuffer) {
+        guard usesRecordingInput else { return }
+        process(buffer)
+    }
+
     func stop() {
         isRunning = false
+        usesRecordingInput = false
         cleanupAudio()
         decodeQueue.sync {
             recognizer?.inputFinished()
             recognizer = nil
             pendingSamples.removeAll()
             lastText = ""
+            partialResultGate.reset()
+            runtimeMetrics = ASRRuntimeMetrics()
         }
     }
 
@@ -152,6 +192,7 @@ final class SherpaOnnxStreamingASR {
     }
 
     private func startAudio(selectedMicUID: String) throws {
+        usesRecordingInput = false
         audioEngine = AVAudioEngine()
 
         if !selectedMicUID.isEmpty, let deviceID = AudioInputDevice.deviceID(forUID: selectedMicUID) {
@@ -180,16 +221,7 @@ final class SherpaOnnxStreamingASR {
             throw ASRError.invalidAudioInput
         }
 
-        guard let targetFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: targetSampleRate,
-            channels: 1,
-            interleaved: false
-        ) else {
-            throw ASRError.invalidAudioInput
-        }
-        self.targetFormat = targetFormat
-        converter = AVAudioConverter(from: inputFormat, to: targetFormat)
+        try configureConverter(for: inputFormat)
 
         configurationChangeObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange,
@@ -224,7 +256,7 @@ final class SherpaOnnxStreamingASR {
     }
 
     private func restartAudioAfterConfigurationChange() {
-        guard isRunning else { return }
+        guard isRunning, !usesRecordingInput else { return }
         cleanupAudio()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
             guard let self, self.isRunning else { return }
@@ -241,9 +273,22 @@ final class SherpaOnnxStreamingASR {
         guard isRunning else { return }
         updateAudioLevel(buffer)
 
+        if converter == nil {
+            do {
+                try configureConverter(for: buffer.format)
+            } catch {
+                isRunning = false
+                DispatchQueue.main.async { [weak self] in
+                    self?.onError?(error.localizedDescription)
+                }
+                return
+            }
+        }
+
         guard let samples = convertToModelSamples(buffer), !samples.isEmpty else { return }
         decodeQueue.async { [weak self] in
             guard let self, self.isRunning, let recognizer = self.recognizer else { return }
+            let decodeStart = ProcessInfo.processInfo.systemUptime
             self.pendingSamples.append(contentsOf: samples)
 
             while self.pendingSamples.count >= self.decodeChunkSize {
@@ -254,9 +299,13 @@ final class SherpaOnnxStreamingASR {
                     recognizer.decode()
                 }
             }
+            self.runtimeMetrics.record(
+                audioSeconds: Double(samples.count) / self.targetSampleRate,
+                decodeSeconds: ProcessInfo.processInfo.systemUptime - decodeStart
+            )
 
             let text = recognizer.getResult().text.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !text.isEmpty, text != self.lastText {
+            if self.partialResultGate.accepts(text, at: ProcessInfo.processInfo.systemUptime) {
                 self.lastText = text
                 DispatchQueue.main.async { [weak self] in
                     self?.onTextUpdate?(text)
@@ -267,11 +316,31 @@ final class SherpaOnnxStreamingASR {
                 recognizer.reset()
                 self.pendingSamples.removeAll(keepingCapacity: true)
                 self.lastText = ""
+                self.partialResultGate.reset()
                 DispatchQueue.main.async { [weak self] in
                     self?.onNewSegment?()
                 }
             }
         }
+    }
+
+    var diagnostics: ASRRuntimeMetricsSnapshot {
+        decodeQueue.sync { runtimeMetrics.snapshot }
+    }
+
+    private func configureConverter(for inputFormat: AVAudioFormat) throws {
+        guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0,
+              let targetFormat = AVAudioFormat(
+                  commonFormat: .pcmFormatFloat32,
+                  sampleRate: targetSampleRate,
+                  channels: 1,
+                  interleaved: false
+              ) else {
+            throw ASRError.invalidAudioInput
+        }
+
+        self.targetFormat = targetFormat
+        converter = AVAudioConverter(from: inputFormat, to: targetFormat)
     }
 
     private func convertToModelSamples(_ buffer: AVAudioPCMBuffer) -> [Float]? {

@@ -101,6 +101,18 @@ Run focused recording-core checks:
 scripts/run-recording-core-tests.sh
 ```
 
+## Recording Reliability
+
+The recording path uses media presentation timestamps as one session timeline for screen, camera, microphone, and system audio. Camera raw frames are written through a bounded background queue, while preview rendering remains independent. Export duration follows the session master range, including 5/10/30/60-minute synthetic duration checks, rather than a camera-track duration or a three-minute cap.
+
+When a macOS 14 microphone recording is active, live speech tracking receives a separate 16 kHz mono ASR stream from the same microphone tap. The recorded audio remains at its configured quality, and ASR decode plus script alignment run off the UI thread. The existing sherpa-onnx model remains the default provider. Camera preview rendering uses a lightweight, window-sized path separate from the raw recording writer so the first visible frame is not delayed by full-frame border analysis.
+
+Live script alignment uses only the recent ASR token tail, so cumulative partial results do not repeatedly compare already-consumed speech against the new script position. Normal tracking stays inside a small local window; after 1.5 seconds without a trusted match, recovery expands to a bounded forward window. A distant re-anchor still requires two consistent high-confidence results, and the legacy matcher cannot bypass that guard while tracking is lost.
+
+Completed: shared recording timeline, bounded camera writer, session-driven export range, isolated local ASR input/decode, adaptive script-alignment recovery, focused core checks, and unsigned Debug builds. TODO before release: finish the complete short hardware matrix, a 30-minute A/V soak, and real 10/30/60-minute export acceptance. The main design decisions are to keep media PTS authoritative, keep sherpa-onnx local and default, keep alignment off the UI thread, and prefer guarded recovery over lowering the global match threshold.
+
+Before a release, run the focused checks above and then perform the hardware smoke matrix: no camera, microphone only, system audio only, and selected-area recording. A 30-minute A/V soak and 10/30/60-minute real export checks remain required release acceptance on the target hardware.
+
 ## Release Build
 
 `build.sh` creates a universal macOS app, signs it with Developer ID, builds a DMG, submits it to Apple notarization, staples the ticket, and validates the final artifact.
@@ -137,6 +149,7 @@ build/release/CueRecord.dmg
 ```text
 CueRecord/                App source
 CueRecord/Recording/      Recording pipeline, UI, selection, metrics, export organization
+CueRecord/Teleprompter/   Script tokenization and background alignment rules
 Tests/RecordingCoreTests/ Focused command-line checks for recording core behavior
 Vendor/                   Git LFS tracked native libraries and local ASR model assets
 build.sh                  Signed, notarized release DMG build script

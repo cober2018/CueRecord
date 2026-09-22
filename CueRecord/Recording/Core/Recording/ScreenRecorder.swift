@@ -87,6 +87,7 @@ class ScreenRecorder: NSObject, ObservableObject {
     private var recordingStartTime: CMTime = .zero
     private var frameCount: Int64 = 0
     private var firstVideoFrameTime: CMTime?  // 记录第一帧视频的时间戳
+    private let recordingTimeline = RecordingTimeline()
     private let audioStartGate = AudioStartGate()
     private var pendingAudioBuffers: [PendingAudioSample] = []
     private let recordingMetrics = RecordingMetricsRecorder()
@@ -112,20 +113,15 @@ class ScreenRecorder: NSObject, ObservableObject {
     private var cameraOverlaySnapshotProvider: (() -> CameraOverlaySnapshot?)?
 
     // 独立摄像头视频轨
-    private var cameraWriter: AVAssetWriter?
-    private var cameraWriterInput: AVAssetWriterInput?
-    private var cameraPixelBufferAdapter: AVAssetWriterInputPixelBufferAdaptor?
+    private var cameraTrackWriter: CameraTrackWriter?
     private var isCameraTrackRecording = false
     private var cameraOutputURL: URL?
     private var overlayMetadataURL: URL?
-    private var cameraOutputDimensions: (width: Int, height: Int)?
     private var cameraFrameCount: Int64 = 0
     private var postProcessingHandler: (@MainActor (RecordingPostProcessingEvent) -> Void)?
-    private var cameraFirstFrameTime: CMTime?
     private var overlayMetadataStartTime: CMTime?
     private var lastCameraElapsedTime: Double?
     private var overlayMetadataSamples: [CameraOverlayMetadataSample] = []
-    private let cameraCIContext = CIContext()
 
     private nonisolated static let screenTargetFrameRate = 60
 
@@ -222,6 +218,7 @@ class ScreenRecorder: NSObject, ObservableObject {
             pendingAudioBuffers.removeAll()
             frameCount = 0
             firstVideoFrameTime = nil
+            recordingTimeline.reset()
             setCameraOverlay(enabled: cameraOverlay, position: cameraPosition, size: cameraSize)
 
             // 启动摄像头（如果需要）
@@ -267,6 +264,7 @@ class ScreenRecorder: NSObject, ObservableObject {
         } else {
             avAudioEngineRecorder?.stopRecording()
             avAudioEngineRecorder = nil
+            ASRAudioInputBridge.shared.endRecordingInput()
         }
         
         // 停止独立摄像头视频轨，再关闭摄像头采集
@@ -320,20 +318,18 @@ class ScreenRecorder: NSObject, ObservableObject {
             cameraManager.setRecordingFrameHandler(nil)
         }
 
+        ASRAudioInputBridge.shared.endRecordingInput()
+
         cameraManager.stopCapture()
         videoWriter?.cancelWriting()
-        cameraWriter?.cancelWriting()
+        cameraTrackWriter?.cancel()
 
         videoWriter = nil
         videoWriterInput = nil
         audioWriterInput = nil
         microphoneWriterInput = nil
         pixelBufferAdapter = nil
-        cameraWriter = nil
-        cameraWriterInput = nil
-        cameraPixelBufferAdapter = nil
-        cameraOutputDimensions = nil
-        cameraFirstFrameTime = nil
+        cameraTrackWriter = nil
         overlayMetadataStartTime = nil
         lastCameraElapsedTime = nil
         overlayMetadataSamples = []
@@ -640,7 +636,11 @@ class ScreenRecorder: NSObject, ObservableObject {
         } else {
             if let avRecorder = avAudioEngineRecorder,
                let micInput = microphoneWriterInput {
-                try avRecorder.startRecording(writerInput: micInput)
+                let bridge = ASRAudioInputBridge.shared
+                bridge.beginRecordingInput()
+                try avRecorder.startRecording(writerInput: micInput) { buffer in
+                    bridge.submit(buffer)
+                }
                 print("🎤 AVAudioEngine开始录制麦克风")
             }
         }
@@ -880,11 +880,10 @@ class ScreenRecorder: NSObject, ObservableObject {
     private func startCameraTrackRecording() {
         guard !isCameraTrackRecording, let outputURL else { return }
 
-        cameraOutputURL = Self.siblingOutputURL(for: outputURL, suffix: "camera", extension: "mov")
+        let cameraURL = Self.siblingOutputURL(for: outputURL, suffix: "camera", extension: "mov")
+        cameraOutputURL = cameraURL
         overlayMetadataURL = Self.siblingOutputURL(for: outputURL, suffix: "overlay", extension: "json")
         cameraFrameCount = 0
-        cameraFirstFrameTime = nil
-        cameraOutputDimensions = nil
         overlayMetadataStartTime = nil
         lastCameraElapsedTime = nil
         overlayMetadataSamples = []
@@ -896,167 +895,29 @@ class ScreenRecorder: NSObject, ObservableObject {
             try? FileManager.default.removeItem(at: overlayMetadataURL)
         }
 
+        let writer = CameraTrackWriter(
+            outputURL: cameraURL,
+            timeline: recordingTimeline
+        ) { [weak self] elapsedTime, frameCount in
+            Task { @MainActor [weak self] in
+                self?.recordCameraFrameWritten(elapsedTime: elapsedTime, frameCount: frameCount)
+            }
+        }
+        cameraTrackWriter = writer
         isCameraTrackRecording = true
-        cameraManager.setRecordingFrameHandler { [weak self] frame in
-            self?.appendCameraFrame(frame)
+        cameraManager.setRecordingFrameHandler { frame in
+            writer.append(frame)
         }
 
         print("📷 独立摄像头视频轨开始: \(cameraOutputURL?.lastPathComponent ?? "")")
     }
 
-    private func appendCameraFrame(_ frame: CameraFrameSample) {
-        guard let videoStartTime = firstVideoFrameTime else { return }
-
-        let sourceTime = frame.timestamp.isValid
-            ? frame.timestamp
-            : CMTime(value: CMTimeValue(frame.sequence), timescale: 30)
-
-        guard sourceTime >= videoStartTime else { return }
-
-        let processedFrame = CameraFrameProcessor.mirroredVisibleImage(from: frame.pixelBuffer)
-
-        do {
-            if cameraWriter == nil {
-                let dimensions = CameraFrameProcessor.evenDimensions(for: processedFrame.extent.size)
-                try setupCameraVideoWriter(width: dimensions.width, height: dimensions.height)
-            }
-        } catch {
-            print("❌ 摄像头视频写入器创建失败: \(error.localizedDescription)")
-            isCameraTrackRecording = false
-            cameraManager.setRecordingFrameHandler(nil)
-            return
-        }
-
-        guard let writer = cameraWriter,
-              let writerInput = cameraWriterInput,
-              let adapter = cameraPixelBufferAdapter,
-              let dimensions = cameraOutputDimensions,
-              writer.status == .writing else {
-            return
-        }
-
-        if cameraFirstFrameTime == nil {
-            cameraFirstFrameTime = videoStartTime
-            overlayMetadataStartTime = videoStartTime
-            writer.startSession(atSourceTime: .zero)
-        }
-
-        let rawPresentationTime = CMTimeSubtract(sourceTime, videoStartTime)
-        let presentationTime = rawPresentationTime.isValid && rawPresentationTime >= .zero
-            ? rawPresentationTime
-            : .zero
-        lastCameraElapsedTime = presentationTime.seconds.isFinite ? presentationTime.seconds : lastCameraElapsedTime
-
-        if cameraFrameCount % 8 == 0 {
-            captureOverlayMetadataSample(at: lastCameraElapsedTime)
-        }
-
-        guard writerInput.isReadyForMoreMediaData,
-              let outputPixelBuffer = renderCameraFrame(
-                processedFrame.image,
-                sourceExtent: processedFrame.extent,
-                width: dimensions.width,
-                height: dimensions.height,
-                adapter: adapter
-              ) else {
-            return
-        }
-
-        if adapter.append(outputPixelBuffer, withPresentationTime: presentationTime) {
-            cameraFrameCount += 1
-            recordingMetrics.updateCamera(
-                received: cameraManager.receivedFrameCount,
-                written: cameraFrameCount,
-                dropped: cameraManager.droppedFrameCount
-            )
-        } else {
-            print("⚠️  摄像头帧写入失败: \(cameraFrameCount)")
-        }
-    }
-
-    private func setupCameraVideoWriter(width: Int, height: Int) throws {
-        guard let cameraOutputURL else { return }
-
-        cameraWriter = try AVAssetWriter(outputURL: cameraOutputURL, fileType: .mov)
-        guard let writer = cameraWriter else {
-            throw RecordingError.writerSetupFailed
-        }
-
-        let bitRate = max(4_000_000, width * height * 4)
-        let videoSettings: [String: Any] = [
-            AVVideoCodecKey: AVVideoCodecType.h264,
-            AVVideoWidthKey: width,
-            AVVideoHeightKey: height,
-            AVVideoColorPropertiesKey: Self.rec709VideoColorProperties(),
-            AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: bitRate,
-                AVVideoMaxKeyFrameIntervalKey: 30,
-                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
-                AVVideoAllowFrameReorderingKey: false,
-                AVVideoExpectedSourceFrameRateKey: 30,
-                AVVideoQualityKey: 0.9
-            ]
-        ]
-
-        cameraWriterInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
-        cameraWriterInput?.expectsMediaDataInRealTime = true
-
-        guard let writerInput = cameraWriterInput, writer.canAdd(writerInput) else {
-            throw RecordingError.writerSetupFailed
-        }
-
-        let pixelBufferAttributes: [String: Any] = [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-            kCVPixelBufferWidthKey as String: width,
-            kCVPixelBufferHeightKey as String: height,
-            kCVPixelBufferCGImageCompatibilityKey as String: true,
-            kCVPixelBufferCGBitmapContextCompatibilityKey as String: true
-        ]
-
-        cameraPixelBufferAdapter = AVAssetWriterInputPixelBufferAdaptor(
-            assetWriterInput: writerInput,
-            sourcePixelBufferAttributes: pixelBufferAttributes
-        )
-        writer.add(writerInput)
-
-        guard writer.startWriting() else {
-            throw RecordingError.writerSetupFailed
-        }
-
-        cameraOutputDimensions = (width, height)
-        print("📷 摄像头视频写入器配置完成: \(width)x\(height)")
-    }
-
-    private func renderCameraFrame(
-        _ image: CIImage,
-        sourceExtent: CGRect,
-        width: Int,
-        height: Int,
-        adapter: AVAssetWriterInputPixelBufferAdaptor
-    ) -> CVPixelBuffer? {
-        guard let pixelBufferPool = adapter.pixelBufferPool else { return nil }
-
-        var outputPixelBuffer: CVPixelBuffer?
-        let status = CVPixelBufferPoolCreatePixelBuffer(nil, pixelBufferPool, &outputPixelBuffer)
-        guard status == kCVReturnSuccess, let outputPixelBuffer else {
-            return nil
-        }
-
-        let outputExtent = CGRect(x: 0, y: 0, width: width, height: height)
-        let scaledImage = Self.aspectFill(
-            image,
-            sourceExtent: sourceExtent,
-            targetRect: outputExtent
-        )
-
-        cameraCIContext.render(
-            scaledImage,
-            to: outputPixelBuffer,
-            bounds: outputExtent,
-            colorSpace: CGColorSpaceCreateDeviceRGB()
-        )
-
-        return outputPixelBuffer
+    private func recordCameraFrameWritten(elapsedTime: Double, frameCount: Int64) {
+        guard isCameraTrackRecording else { return }
+        cameraFrameCount = frameCount
+        lastCameraElapsedTime = elapsedTime
+        overlayMetadataStartTime = recordingTimeline.origin
+        captureOverlayMetadataSample(at: elapsedTime)
     }
 
     private func stopCameraTrackRecording() async {
@@ -1065,35 +926,25 @@ class ScreenRecorder: NSObject, ObservableObject {
 
         captureOverlayMetadataSample(at: lastCameraElapsedTime)
 
-        if let writer = cameraWriter {
-            cameraWriterInput?.markAsFinished()
-            await writer.finishWriting()
-
-            switch writer.status {
-            case .completed:
-                print("✅ 摄像头视频保存成功: \(cameraOutputURL?.lastPathComponent ?? "")")
-            case .failed:
-                print("❌ 摄像头视频保存失败: \(writer.error?.localizedDescription ?? "未知错误")")
-            case .cancelled:
-                print("⚠️  摄像头视频写入被取消")
-            default:
-                print("⚠️  摄像头视频写入状态未知: \(writer.status.rawValue)")
-            }
+        let writerSnapshot = await cameraTrackWriter?.finish()
+        if let writerSnapshot {
+            cameraFrameCount = writerSnapshot.framesWritten
+            lastCameraElapsedTime = writerSnapshot.lastRelativePTSSeconds ?? lastCameraElapsedTime
+            recordingMetrics.applyCameraWriterSnapshot(
+                received: cameraManager.receivedFrameCount,
+                previewDropped: cameraManager.droppedFrameCount,
+                framesWritten: writerSnapshot.framesWritten,
+                droppedQueueOverflow: writerSnapshot.droppedQueueOverflow,
+                droppedWriterNotReady: writerSnapshot.droppedWriterNotReady,
+                droppedNonMonotonicPTS: writerSnapshot.droppedNonMonotonicPTS,
+                maxPendingQueueDepth: writerSnapshot.maxPendingQueueDepth,
+                lastRelativePTSSeconds: writerSnapshot.lastRelativePTSSeconds
+            )
         }
-
-        recordingMetrics.updateCamera(
-            received: cameraManager.receivedFrameCount,
-            written: cameraFrameCount,
-            dropped: cameraManager.droppedFrameCount
-        )
 
         writeOverlayMetadataFile()
 
-        cameraWriter = nil
-        cameraWriterInput = nil
-        cameraPixelBufferAdapter = nil
-        cameraOutputDimensions = nil
-        cameraFirstFrameTime = nil
+        cameraTrackWriter = nil
         overlayMetadataStartTime = nil
         lastCameraElapsedTime = nil
         overlayMetadataSamples = []
@@ -1358,6 +1209,13 @@ class ScreenRecorder: NSObject, ObservableObject {
               let cameraTrack = cameraAsset.tracks(withMediaType: .video).first else {
             return false
         }
+        let masterRange = RecordingMasterRange.resolve(
+            sessionDuration: screenAsset.duration,
+            screenDuration: screenAsset.duration,
+            cameraDuration: cameraAsset.duration,
+            audioDuration: nil
+        )
+        guard masterRange.duration > .zero else { return false }
 
         let screenSize = Self.normalizedVideoSize(for: screenTrack)
         let outputSize = exportSettings.outputSize(for: screenSize)
@@ -1458,7 +1316,12 @@ class ScreenRecorder: NSObject, ObservableObject {
             }
 
             let screenImage = CIImage(cvPixelBuffer: screenPixelBuffer)
-            let cameraImage = currentCameraPixelBuffer.map { CIImage(cvPixelBuffer: $0) }
+            let cameraImage: CIImage?
+            if masterRange.cameraTail == .hidden && currentCameraPixelBuffer == nil {
+                cameraImage = nil
+            } else {
+                cameraImage = currentCameraPixelBuffer.map { CIImage(cvPixelBuffer: $0) }
+            }
             let seconds = max(0, CMTimeGetSeconds(screenTime))
             let sample = Self.overlaySample(at: seconds, in: metadata.samples)
             let composedImage = Self.composeScreenImage(
@@ -2815,6 +2678,7 @@ extension ScreenRecorder {
         // 设置录制开始时间（只设置一次）
         if firstVideoFrameTime == nil {
             firstVideoFrameTime = currentFrameTime
+            recordingTimeline.start(at: currentFrameTime)
             recordingStartTime = .zero
             writer.startSession(atSourceTime: recordingStartTime)
             flushPendingAudioBuffers()
@@ -2823,7 +2687,10 @@ extension ScreenRecorder {
 
         // 计算相对于第一帧的时间差，使用实际时间戳
         guard let firstTime = firstVideoFrameTime else { return }
-        let relativeTime = CMTimeSubtract(currentFrameTime, firstTime)
+        guard let relativeTime = recordingTimeline.map(currentFrameTime, source: .screen) else {
+            recordingMetrics.recordCameraDrop(.nonMonotonicPTS)
+            return
+        }
         guard let adjustedBuffer = adjustedVideoSampleBuffer(sampleBuffer, relativeTo: firstTime) else {
             return
         }
@@ -3019,6 +2886,20 @@ extension ScreenRecorder {
         
         guard let input = writerInput else {
             print("⚠️  音频写入器不可用: \(type)")
+            return
+        }
+
+        let timelineSource: RecordingSource
+        switch type {
+        case .systemAudio:
+            timelineSource = .systemAudio
+        case .microphone:
+            timelineSource = .microphone
+        }
+        let originalTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        let effectiveStart = firstVideoFrameTime.map { CMTimeMaximum(originalTime, $0) } ?? originalTime
+        guard recordingTimeline.map(effectiveStart, source: timelineSource) != nil else {
+            recordingMetrics.incrementAudioAppendFailed()
             return
         }
         

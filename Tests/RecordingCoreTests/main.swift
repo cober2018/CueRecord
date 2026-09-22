@@ -65,6 +65,76 @@ func testAudioStartGate() throws {
     )
 }
 
+func testRecordingTimeline() throws {
+    let timeline = RecordingTimeline()
+    let origin = seconds(100)
+    timeline.start(at: origin)
+
+    try expect(timeline.map(origin, source: .screen) == .zero, "Timeline origin should map to zero")
+    try expect(timeline.map(seconds(100.066), source: .camera) == seconds(0.066), "Timeline should preserve elapsed PTS")
+    try expect(timeline.map(seconds(100.133), source: .camera) == seconds(0.133), "Dropped frames must not compress elapsed time")
+    try expect(timeline.map(seconds(99.9), source: .camera) == nil, "Pre-origin samples should be dropped")
+    try expect(timeline.map(seconds(100.120), source: .camera) == nil, "Backward source PTS should be dropped")
+    try expect(timeline.map(seconds(100.020), source: .microphone) == seconds(0.020), "Microphone-only recordings should map on the shared timeline")
+    try expect(timeline.map(seconds(100.040), source: .systemAudio) == seconds(0.040), "System-audio recordings should map on the shared timeline")
+}
+
+func testScriptAlignment() throws {
+    let aligner = ScriptAligner(script: "大家好，今天介绍 AI【看镜头】然后导出")
+    let tokens = aligner.tokens
+    try expect(tokens.contains(where: { $0.raw == "AI" }), "Latin runs should remain one token")
+    try expect(!tokens.contains(where: { $0.raw == "看镜头" }), "Stage annotations should not become spoken tokens")
+
+    let exact = aligner.consume("大家好今天介绍AI", now: 0)
+    try expect(exact?.committed == true, "Exact mixed-script speech should commit")
+    let filler = aligner.consume("然后嗯导出", now: 0.2)
+    try expect(filler != nil, "Filler words should still produce an alignment result")
+}
+
+func testScriptAlignmentCumulativePartialsKeepAdvancing() throws {
+    let script = "今天我们先介绍产品背景然后说明核心方法最后总结执行步骤"
+    let aligner = ScriptAligner(script: script)
+
+    let first = aligner.consume("今天我们先介绍产品背景", now: 0)
+    try expect(first?.committed == true, "Initial partial should establish progress")
+    let firstIndex = aligner.state.committedTokenIndex
+
+    let cumulative = aligner.consume("今天我们先介绍产品背景然后说明核心方法", now: 0.2)
+    try expect(cumulative?.committed == true, "A cumulative partial should commit its newly spoken tail")
+    try expect(
+        aligner.state.committedTokenIndex > firstIndex,
+        "Repeated committed prefix must not stall later speech"
+    )
+}
+
+func testScriptAlignmentReanchorsAfterFastSpeechOutrunsWindow() throws {
+    let words = (0..<180).map { "term\($0)" }
+    let aligner = ScriptAligner(script: words.joined(separator: " "))
+
+    let initial = aligner.consume(words[0..<6].joined(separator: " "), now: 0)
+    try expect(initial?.committed == true, "Initial phrase should establish the anchor")
+    let initialIndex = aligner.state.committedTokenIndex
+
+    let laterPhrase = words[120..<126].joined(separator: " ")
+    let firstRecovery = aligner.consume(laterPhrase, now: 1.6)
+    try expect(firstRecovery?.mode == .lost, "The first far match should enter guarded recovery")
+    try expect(
+        firstRecovery?.allowsLegacyFallback == false,
+        "Lost recovery must not let the legacy matcher bypass large-jump consensus"
+    )
+    try expect(
+        aligner.state.committedTokenIndex == initialIndex,
+        "A single far candidate must not jump the script"
+    )
+
+    let confirmedRecovery = aligner.consume(laterPhrase, now: 1.8)
+    try expect(confirmedRecovery?.committed == true, "A repeated distinctive far match should re-anchor")
+    try expect(
+        aligner.state.committedTokenIndex >= 126,
+        "Confirmed recovery should catch up beyond the normal local window"
+    )
+}
+
 func testBoundedDropOldestBuffer() throws {
     var buffer = BoundedDropOldestBuffer<Int>(capacity: 2)
     buffer.append(1)
@@ -74,6 +144,79 @@ func testBoundedDropOldestBuffer() throws {
     try expect(buffer.droppedCount == 1, "Buffer should count dropped oldest entries")
     try expect(buffer.removeAll() == [2, 3], "Buffer should keep newest entries")
     try expect(buffer.isEmpty, "removeAll should empty the buffer")
+}
+
+func testCameraWriterIngress() throws {
+    let ingress = CameraWriterIngress<Int>(capacity: 2)
+
+    try expect(ingress.submit(1) == .scheduled, "First camera frame should schedule the serial writer")
+    try expect(ingress.submit(2) == .enqueued, "Pending camera frames should not schedule duplicate drains")
+    try expect(ingress.submit(3) == .droppedOldest, "A full camera queue should drop only its oldest frame")
+    try expect(ingress.takeNext() == 2, "Writer should retain the newer frame after overflow")
+    try expect(ingress.takeNext() == 3, "Writer should preserve FIFO order for retained frames")
+    try expect(ingress.takeNext() == nil, "An empty writer queue should finish its drain")
+    try expect(ingress.submit(4) == .scheduled, "A later frame should schedule a new drain")
+
+    ingress.close()
+    try expect(ingress.submit(5) == .rejected, "A stopped writer must reject late camera frames")
+    try expect(ingress.snapshot.droppedQueueOverflow == 1, "Queue overflow should be counted separately")
+    try expect(ingress.snapshot.maxPendingDepth == 2, "Writer queue depth should be observable")
+}
+
+func testRecordingMasterRange() throws {
+    let master = RecordingMasterRange.resolve(
+        sessionDuration: seconds(600),
+        screenDuration: seconds(600),
+        cameraDuration: seconds(599.8),
+        audioDuration: seconds(600)
+    )
+    try expect(master.duration == seconds(600), "Session duration must remain the export master range")
+    try expect(master.cameraTail == .holdLastFrame, "A short camera track should hold its last frame")
+
+    for duration in [300.0, 600.0, 1800.0, 3600.0] {
+        let range = RecordingMasterRange.resolve(
+            sessionDuration: seconds(duration),
+            screenDuration: seconds(duration),
+            cameraDuration: nil,
+            audioDuration: nil
+        )
+        try expect(range.duration == seconds(duration), "Long sessions must not be capped at three minutes")
+        try expect(range.cameraTail == .hidden, "No camera track should not affect the master range")
+        try expect(
+            range.matchesOutputDuration(seconds(duration) + seconds(0.05), tolerance: seconds(0.1)),
+            "Synthetic export duration should match its master range within tolerance"
+        )
+        try expect(
+            !range.matchesOutputDuration(seconds(180), tolerance: seconds(0.1)),
+            "A three-minute export must not validate against a longer session master range"
+        )
+    }
+}
+
+func testASRPartialResultGate() throws {
+    var gate = ASRPartialResultGate(minimumInterval: 0.12)
+    try expect(gate.accepts("你好", at: 0), "First ASR partial should be delivered")
+    try expect(!gate.accepts("你好", at: 0.2), "Duplicate ASR partial should be suppressed")
+    try expect(!gate.accepts("你好世界", at: 0.05), "Fast partial updates should be throttled")
+    try expect(gate.accepts("你好世界", at: 0.12), "Changed partial should pass after the throttle interval")
+}
+
+func testASRRuntimeMetrics() throws {
+    var metrics = ASRRuntimeMetrics()
+    metrics.record(audioSeconds: 1.6, decodeSeconds: 0.4)
+    try expect(metrics.snapshot.audioSeconds == 1.6, "ASR metrics should retain processed audio duration")
+    try expect(metrics.snapshot.realTimeFactor == 0.25, "ASR RTF should be decode time divided by audio duration")
+}
+
+func testASRAudioInputBridge() throws {
+    let bridge = ASRAudioInputBridge()
+    try expect(!bridge.isRecordingInputActive, "Recognition should use its own input before recording starts")
+
+    bridge.beginRecordingInput()
+    try expect(bridge.isRecordingInputActive, "Recording should make its microphone input available to ASR")
+
+    bridge.endRecordingInput()
+    try expect(!bridge.isRecordingInputActive, "Stopping recording should release the shared microphone input")
 }
 
 func testResolvedRecordingTarget() throws {
@@ -519,7 +662,16 @@ func testSpeechTrackingThreeCJKAnchorCrossesBreakTokens() throws {
 
 let tests: [(String, () throws -> Void)] = [
     ("AudioStartGate", testAudioStartGate),
+    ("RecordingTimeline", testRecordingTimeline),
+    ("ScriptAlignment", testScriptAlignment),
+    ("ScriptAlignmentCumulativePartialsKeepAdvancing", testScriptAlignmentCumulativePartialsKeepAdvancing),
+    ("ScriptAlignmentReanchorsAfterFastSpeechOutrunsWindow", testScriptAlignmentReanchorsAfterFastSpeechOutrunsWindow),
     ("BoundedDropOldestBuffer", testBoundedDropOldestBuffer),
+    ("CameraWriterIngress", testCameraWriterIngress),
+    ("RecordingMasterRange", testRecordingMasterRange),
+    ("ASRPartialResultGate", testASRPartialResultGate),
+    ("ASRRuntimeMetrics", testASRRuntimeMetrics),
+    ("ASRAudioInputBridge", testASRAudioInputBridge),
     ("ResolvedRecordingTarget", testResolvedRecordingTarget),
     ("MetricsAndValidator", testMetricsURLAndMissingOutputValidation),
     ("RecordingPixelFormatPolicy", testRecordingPixelFormatPolicy),
